@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+studio_data/
+hf_cache/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.venv/
+venv/

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>字幕翻译工作室</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <span class="eyebrow">LOCAL-FIRST SUBTITLE TOOL</span>
+        <h1>字幕翻译工作室</h1>
+        <p>适用于访谈、课程、影视等视频：识别语音、翻译字幕，并生成软／硬字幕视频</p>
+      </div>
+      <div id="health" class="health">正在检查环境…</div>
+    </header>
+
+    <section class="panel">
+      <h2>1. 选择视频</h2>
+      <div class="source-tabs">
+        <button class="tab active" data-mode="path">本机路径</button>
+        <button class="tab" data-mode="upload">上传视频</button>
+      </div>
+      <div id="path-source" class="source-view active">
+        <label>视频绝对路径<input id="input-path" placeholder="E:\Videos\example.mp4"><small class="field-help">直接读取本机文件，不需要复制或上传；请输入包含扩展名的完整路径</small></label>
+      </div>
+      <div id="upload-source" class="source-view">
+        <label class="drop"><input id="upload-file" type="file" accept="video/*,audio/*">选择视频或音频</label>
+        <div class="meter"><i id="upload-progress"></i></div>
+        <small id="upload-status">大文件会流式保存到本地任务目录</small>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>2. 质量策略</h2>
+      <div class="profile-grid">
+        <label class="profile"><input type="radio" name="profile" value="precision"><b>高精度</b><span>最大限度抑制喘息幻听，可能漏掉低声对白</span></label>
+        <label class="profile selected"><input type="radio" name="profile" value="balanced" checked><b>均衡</b><span>推荐：长空白二次召回必须通过双模型一致</span></label>
+        <label class="profile"><input type="radio" name="profile" value="recall"><b>高召回</b><span>检查更多临界声音，耗时更长</span></label>
+      </div>
+      <div class="check-row">
+        <label title="对较长无字幕区间重新检查临界人声，并要求双模型一致"><input id="gap-recovery" type="checkbox" checked>长空白二次召回 <em>减少轻声对白漏识别</em></label>
+        <label title="移除中文行末的全角句号，问号和感叹号仍保留"><input id="remove-periods" type="checkbox" checked>中文字幕不带句号 <em>只移除。</em></label>
+        <label title="隐藏【听不清】等内部占位符，生成适合直接观看的字幕"><input id="publish-mode" type="checkbox" checked>生成观看版 <em>清理内部占位符</em></label>
+        <label title="把字幕作为可开关的轨道封装进 MP4，不重编码画面"><input id="soft-video" type="checkbox" checked>生成软字幕视频 <em>速度快、可开关</em></label>
+        <label title="将字幕永久烧录到画面，需要重新编码整部视频"><input id="hard-video" type="checkbox">生成硬字幕视频 <em>兼容性高、耗时较长</em></label>
+      </div>
+    </section>
+
+    <section class="columns">
+      <div class="panel provider" id="asr-panel">
+        <h2>3. 日语识别模型</h2>
+        <label>提供方
+          <select id="asr-kind"><option value="local_whisper">本地 Whisper</option><option value="openai_compatible">OpenAI 兼容接口</option></select>
+          <small class="field-help">本地 Whisper 不发送音频到网络；兼容接口适合使用云端或局域网 ASR 服务</small>
+        </label>
+        <div class="remote-fields hidden" data-for="asr">
+          <label>Base URL<input id="asr-url" value="https://api.openai.com/v1"><small class="field-help">服务根地址，可填到域名或 /v1；软件会自动补齐 /v1</small></label>
+          <label>API Key<input id="asr-key" type="password" autocomplete="off"><small class="field-help">仅用于当前进程请求，不保存到任务记录</small></label>
+        </div>
+        <label>识别模型<div class="model-row"><select id="asr-model"></select><button type="button" id="refresh-asr">刷新模型</button></div><input id="asr-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="asr-model-help" class="field-help">medium：默认主识别模型，速度与日语准确率较均衡</small></label>
+        <div id="installed-whisper" class="model-status">正在读取本机模型…</div>
+        <label>本地复核模型<select id="verifier-model"></select><small id="verifier-model-help" class="field-help">只复核初筛后的对白；large-v3 更准确但更占显存，不会全片重复识别</small></label>
+      </div>
+
+      <div class="panel provider" id="translator-panel">
+        <h2>4. 中文翻译模型</h2>
+        <label>提供方
+          <select id="translator-kind"><option value="local_ollama">本地 Ollama</option><option value="openai_compatible">OpenAI 兼容接口</option></select>
+          <small class="field-help">Ollama 在本机翻译；兼容接口调用支持 Chat Completions 的服务</small>
+        </label>
+        <label>Base URL<input id="translator-url" value="http://127.0.0.1:11434"><small class="field-help">Ollama 默认地址为 http://127.0.0.1:11434；兼容服务通常以 /v1 结尾</small></label>
+        <div class="remote-fields hidden" data-for="translator">
+          <label>API Key<input id="translator-key" type="password" autocomplete="off"><small class="field-help">只在当前任务中使用，任务状态文件中会被清空</small></label>
+        </div>
+        <label>翻译模型<div class="model-row"><select id="translator-model"></select><button type="button" id="refresh-translator">刷新模型</button></div><input id="translator-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="translator-model-help" class="field-help">逐句日译中，并额外审计“不要、等一下、没听说”等高风险语义</small></label>
+      </div>
+    </section>
+
+    <section class="panel launch">
+      <label>输出名称（可选）<input id="output-name" placeholder="默认使用视频文件名"><small class="field-help">只影响生成文件的名称，不会覆盖原视频</small></label>
+      <button id="start" class="primary">开始识别与翻译</button>
+      <p id="form-error" class="error"></p>
+    </section>
+
+    <section class="panel jobs">
+      <div class="section-title"><h2>任务</h2><button id="refresh-jobs">刷新</button></div>
+      <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
