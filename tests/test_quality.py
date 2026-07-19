@@ -2,7 +2,12 @@ import unittest
 from unittest.mock import patch
 
 from studio.quality import finalize_cues, quality_summary
-from studio.recall import accepted_recovery_rows, vad_fallback_events_for_gaps
+from studio.asr_context import attach_asr_reviews
+from studio.recall import (
+    accepted_recovery_rows,
+    filter_events_for_uncovered_speech,
+    vad_fallback_events_for_gaps,
+)
 from studio.schemas import ProviderSettings
 from studio.translation import audit_translation, safe_high_risk, translate_cues
 
@@ -95,6 +100,36 @@ class QualityOptimizationTests(unittest.TestCase):
             0.5,
         )
         self.assertEqual(rejected, [])
+
+    def test_music_recovery_finds_short_uncovered_speech_only(self):
+        events = [
+            {"start": 1.0, "end": 2.0, "speech_score": 0.12, "nonlexical_score": 0.04},
+            {"start": 4.0, "end": 5.0, "speech_score": 0.11, "nonlexical_score": 0.04},
+            {"start": 7.0, "end": 8.0, "speech_score": 0.03, "nonlexical_score": 0.02},
+        ]
+        rows = filter_events_for_uncovered_speech(
+            events, [{"start": 0.8, "end": 2.2}], 0.08, 1.2
+        )
+        self.assertEqual([(x["start"], x["end"]) for x in rows], [(4.0, 5.0)])
+        self.assertEqual(rows[0]["source"], "music_recovery_candidate")
+
+    def test_asr_disagreement_is_attached_for_translation_context(self):
+        rows = attach_asr_reviews(
+            [{"start": 10.0, "end": 12.0, "source": "一本でもごぼう"}],
+            [{"start": 10.0, "end": 12.0, "large_v3": "一本でもごぼう", "medium": "一本でもニンジン", "similarity": 0.5}],
+        )
+        self.assertTrue(rows[0]["asr_review"]["disagreement"])
+        self.assertEqual(rows[0]["asr_review"]["alternative"], "一本でもニンジン")
+
+    def test_naturalness_audit_catches_reported_bad_literal_translations(self):
+        self.assertTrue(audit_translation("毎日拝むぜ", "我每天都要来朝拜啊", "ja"))
+        self.assertTrue(
+            audit_translation("一本でもごぼう、ごぼうでも人参", "即使是一根牛蒡，牛蒡也是胡萝卜", "ja")
+        )
+
+    def test_lexical_nai_adjectives_are_not_mistaken_for_negation(self):
+        self.assertEqual(audit_translation("危ない", "危险", "ja"), [])
+        self.assertEqual(audit_translation("もったいない", "太可惜了", "ja"), [])
 
     def test_japanese_action_direction_is_audited_and_has_safe_fallback(self):
         self.assertTrue(audit_translation("あ、抜けちゃった", "啊，搞砸了", "ja"))

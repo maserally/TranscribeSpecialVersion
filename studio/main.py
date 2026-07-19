@@ -1,17 +1,30 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import aiofiles
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from .config import (
+    ALLOW_LOCAL_OPEN,
+    BASIC_AUTH_ENABLED,
+    BASIC_AUTH_PASSWORD,
+    BASIC_AUTH_USERNAME,
+    CLOUD_MODE,
+    DATA_DIR,
+    PROVIDER_KEY_ENV,
+    SECRET_POLICY,
+)
 from .providers import (
     OllamaProvider,
     OpenAICompatibleProvider,
@@ -20,12 +33,36 @@ from .providers import (
 )
 from .runner import JOBS_DIR, UPLOADS_DIR, manager
 from .schemas import JobOptions, ModelListRequest, SavedProviderSettings
-from .settings_store import load_provider_settings, save_provider_settings
+from .settings_store import (
+    load_provider_settings,
+    resolve_provider_api_keys,
+    save_provider_settings,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.5.0")
+app = FastAPI(title="字幕翻译工作室", version="1.6.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
+
+
+@app.middleware("http")
+async def optional_basic_auth(request: Request, call_next):
+    if not BASIC_AUTH_ENABLED:
+        return await call_next(request)
+    authorization = request.headers.get("Authorization", "")
+    valid = False
+    if authorization.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(authorization[6:]).decode("utf-8")
+            username, password = decoded.split(":", 1)
+            valid = secrets.compare_digest(username, BASIC_AUTH_USERNAME) and secrets.compare_digest(
+                password, BASIC_AUTH_PASSWORD
+            )
+        except (ValueError, UnicodeDecodeError, binascii.Error):
+            pass
+    if not valid:
+        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Subtitle Studio"'})
+    return await call_next(request)
 
 
 @app.get("/")
@@ -51,6 +88,20 @@ def health():
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
         "gpu": gpu,
+        "mode": "cloud" if CLOUD_MODE else "local",
+    }
+
+
+@app.get("/api/runtime")
+def runtime():
+    return {
+        "mode": "cloud" if CLOUD_MODE else "local",
+        "local_open": ALLOW_LOCAL_OPEN,
+        "local_path_input": not CLOUD_MODE,
+        "download_outputs": True,
+        "data_dir": str(DATA_DIR),
+        "auth_enabled": BASIC_AUTH_ENABLED,
+        "secret_policy": SECRET_POLICY,
     }
 
 
@@ -73,7 +124,9 @@ def local_models():
 
 @app.post("/api/models")
 def provider_models(request: ModelListRequest):
-    provider = request.provider
+    provider = request.provider.model_copy(deep=True)
+    if not provider.api_key and request.role:
+        provider.api_key = os.getenv(PROVIDER_KEY_ENV[request.role], "")
     try:
         if provider.kind == "local_ollama":
             models = OllamaProvider(provider.base_url or "http://127.0.0.1:11434").list_models()
@@ -90,13 +143,17 @@ def provider_models(request: ModelListRequest):
 
 @app.get("/api/settings/providers")
 def get_provider_settings():
-    return load_provider_settings()
+    return load_provider_settings(expose_secrets=not CLOUD_MODE)
 
 
 @app.put("/api/settings/providers")
 def put_provider_settings(settings: SavedProviderSettings):
     path = save_provider_settings(settings.model_dump())
-    return {"ok": True, "path": str(path)}
+    return {
+        "ok": True,
+        "path": str(path),
+        "secret_policy": SECRET_POLICY,
+    }
 
 
 @app.post("/api/uploads")
@@ -116,6 +173,7 @@ async def upload(file: UploadFile = File(...)):
 
 @app.post("/api/jobs")
 def create_job(options: JobOptions):
+    options = resolve_provider_api_keys(options)
     path = Path(options.input_path)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=400, detail="输入视频不存在或不是文件")
@@ -190,6 +248,8 @@ def _output_path(job_id: str, output_key: str) -> Path:
 
 
 def _open_local(path: Path):
+    if not ALLOW_LOCAL_OPEN:
+        raise HTTPException(status_code=409, detail="云算力模式不支持服务器端打开，请下载文件")
     try:
         if os.name == "nt":
             os.startfile(str(path))

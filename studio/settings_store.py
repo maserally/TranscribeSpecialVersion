@@ -5,12 +5,12 @@ import ctypes
 import json
 import os
 from ctypes import wintypes
-from pathlib import Path
 from typing import Any
 
+from .config import DATA_DIR, PROVIDER_KEY_ENV, SECURE_LOCAL_SECRETS
 
-ROOT = Path(__file__).resolve().parents[1]
-SETTINGS_PATH = ROOT / "studio_data" / "settings" / "provider_settings.json"
+
+SETTINGS_PATH = DATA_DIR / "settings" / "provider_settings.json"
 
 
 class _DataBlob(ctypes.Structure):
@@ -27,8 +27,8 @@ def _protect(value: str) -> str:
     if not value:
         return ""
     raw = value.encode("utf-8")
-    if os.name != "nt":
-        return "plain:" + base64.b64encode(raw).decode("ascii")
+    if not SECURE_LOCAL_SECRETS:
+        return ""
     source, source_buffer = _blob(raw)
     target = _DataBlob()
     if not ctypes.windll.crypt32.CryptProtectData(
@@ -52,9 +52,7 @@ def _protect(value: str) -> str:
 def _unprotect(value: str) -> str:
     if not value:
         return ""
-    if value.startswith("plain:"):
-        return base64.b64decode(value[6:]).decode("utf-8")
-    if not value.startswith("dpapi:") or os.name != "nt":
+    if not value.startswith("dpapi:") or not SECURE_LOCAL_SECRETS:
         return ""
     encrypted = base64.b64decode(value[6:])
     source, source_buffer = _blob(encrypted)
@@ -71,26 +69,39 @@ def _unprotect(value: str) -> str:
         del source_buffer
 
 
-def load_provider_settings() -> dict[str, Any]:
+def load_provider_settings(*, expose_secrets: bool | None = None) -> dict[str, Any]:
     defaults = {
         "asr": {"kind": "local_whisper", "base_url": "https://api.openai.com/v1", "api_key": "", "model": "medium"},
         "translator": {"kind": "local_ollama", "base_url": "http://127.0.0.1:11434", "api_key": "", "model": "qwen2.5:7b-instruct"},
         "text_reviewer": {"kind": "local_ollama", "base_url": "http://127.0.0.1:11434", "api_key": "", "model": "qwen2.5:7b-instruct"},
         "verifier_model": "large-v3",
     }
-    if not SETTINGS_PATH.exists():
-        return defaults
-    try:
-        stored = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        for name in ("asr", "translator", "text_reviewer"):
-            section = stored.get(name, {})
-            defaults[name].update(
-                {key: str(section.get(key, defaults[name][key])) for key in ("kind", "base_url", "model")}
+    if SETTINGS_PATH.exists():
+        try:
+            stored = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            for name in ("asr", "translator", "text_reviewer"):
+                section = stored.get(name, {})
+                defaults[name].update(
+                    {
+                        key: str(section.get(key, defaults[name][key]))
+                        for key in ("kind", "base_url", "model")
+                    }
+                )
+                defaults[name]["api_key"] = _unprotect(str(section.get("api_key", "")))
+            defaults["verifier_model"] = str(
+                stored.get("verifier_model", defaults["verifier_model"])
             )
-            defaults[name]["api_key"] = _unprotect(str(section.get("api_key", "")))
-        defaults["verifier_model"] = str(stored.get("verifier_model", defaults["verifier_model"]))
-    except Exception:
-        pass
+        except Exception:
+            pass
+    expose = SECURE_LOCAL_SECRETS if expose_secrets is None else expose_secrets
+    for name, env_name in PROVIDER_KEY_ENV.items():
+        env_value = os.getenv(env_name, "")
+        saved_value = defaults[name]["api_key"]
+        defaults[name]["api_key_configured"] = bool(env_value or saved_value)
+        if expose:
+            defaults[name]["api_key"] = saved_value
+        else:
+            defaults[name]["api_key"] = ""
     return defaults
 
 
@@ -110,3 +121,13 @@ def save_provider_settings(settings: dict[str, Any]) -> Path:
     temporary.write_text(json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(SETTINGS_PATH)
     return SETTINGS_PATH
+
+
+def resolve_provider_api_keys(settings):
+    """Fill blank job provider keys from cloud environment variables."""
+    resolved = settings.model_copy(deep=True)
+    for name, env_name in PROVIDER_KEY_ENV.items():
+        provider = getattr(resolved, name)
+        if not provider.api_key:
+            provider.api_key = os.getenv(env_name, "")
+    return resolved

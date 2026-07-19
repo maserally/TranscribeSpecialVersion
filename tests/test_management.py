@@ -11,7 +11,11 @@ from studio.providers import supports_segment_timestamps
 from studio.remote_asr import _remote_packs
 from studio.runner import JobControl, JobManager, JobState
 from studio.schemas import JobOptions, ProviderSettings
-from studio.settings_store import load_provider_settings, save_provider_settings
+from studio.settings_store import (
+    load_provider_settings,
+    resolve_provider_api_keys,
+    save_provider_settings,
+)
 
 
 class TaskManagementTests(unittest.TestCase):
@@ -151,6 +155,42 @@ class TaskManagementTests(unittest.TestCase):
                 self.assertEqual(loaded["asr"]["api_key"], "secret-asr-key")
                 self.assertEqual(loaded["translator"]["model"], "translator-model")
                 self.assertEqual(loaded["text_reviewer"]["api_key"], "secret-review-key")
+
+    def test_cloud_settings_never_persist_keys_and_resolve_environment(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "provider_settings.json"
+            with patch("studio.settings_store.SETTINGS_PATH", path), patch(
+                "studio.settings_store.SECURE_LOCAL_SECRETS", False
+            ), patch.dict(
+                "os.environ",
+                {
+                    "SUBTITLE_ASR_API_KEY": "cloud-asr",
+                    "SUBTITLE_TRANSLATOR_API_KEY": "cloud-translator",
+                    "SUBTITLE_REVIEWER_API_KEY": "cloud-reviewer",
+                },
+                clear=False,
+            ):
+                settings = {
+                    "asr": {"kind": "openai_compatible", "base_url": "https://a/v1", "api_key": "do-not-save", "model": "asr"},
+                    "translator": {"kind": "openai_compatible", "base_url": "https://t/v1", "api_key": "do-not-save", "model": "translator"},
+                    "text_reviewer": {"kind": "openai_compatible", "base_url": "https://r/v1", "api_key": "do-not-save", "model": "reviewer"},
+                    "verifier_model": "large-v3",
+                }
+                save_provider_settings(settings)
+                self.assertNotIn("do-not-save", path.read_text(encoding="utf-8"))
+                loaded = load_provider_settings(expose_secrets=False)
+                self.assertTrue(loaded["translator"]["api_key_configured"])
+                self.assertEqual(loaded["translator"]["api_key"], "")
+                options = JobOptions(
+                    input_path="movie.mp4",
+                    asr=ProviderSettings(kind="openai_compatible", model="asr"),
+                    translator=ProviderSettings(kind="openai_compatible", model="translator"),
+                    text_reviewer=ProviderSettings(kind="openai_compatible", model="reviewer"),
+                )
+                resolved = resolve_provider_api_keys(options)
+                self.assertEqual(resolved.asr.api_key, "cloud-asr")
+                self.assertEqual(resolved.translator.api_key, "cloud-translator")
+                self.assertEqual(resolved.text_reviewer.api_key, "cloud-reviewer")
 
     def test_gpt4o_transcribe_uses_one_vad_window_per_request(self):
         windows = [

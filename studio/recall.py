@@ -76,10 +76,37 @@ def filter_events_for_gaps(
     ]
 
 
+def filter_events_for_uncovered_speech(
+    events: list[dict[str, Any]],
+    recognized: list[dict[str, Any]],
+    recovery_threshold: float,
+    nonlexical_factor: float,
+):
+    """Find short, low-confidence speech candidates that normal long-gap recovery misses."""
+    output = []
+    for event in events:
+        if event["speech_score"] < recovery_threshold:
+            continue
+        if event["speech_score"] <= event["nonlexical_score"] * max(1.0, nonlexical_factor - 0.2):
+            continue
+        if any(
+            min(float(event["end"]), float(row["end"]))
+            - max(float(event["start"]), float(row["start"]))
+            > 0.2
+            for row in recognized
+        ):
+            continue
+        candidate = dict(event)
+        candidate["source"] = "music_recovery_candidate"
+        output.append(candidate)
+    return output
+
+
 def accepted_recovery_rows(
     recovery_final: list[dict[str, Any]],
     comparisons: list[dict[str, Any]],
     consensus_threshold: float,
+    recovery_source: str = "gap_recovery_consensus",
 ):
     accepted = []
     for row in recovery_final:
@@ -92,7 +119,7 @@ def accepted_recovery_rows(
         ]
         if similarities and max(similarities) >= consensus_threshold:
             item = dict(row)
-            item["recovery_source"] = "gap_recovery_consensus"
+            item["recovery_source"] = recovery_source
             accepted.append(item)
     return accepted
 

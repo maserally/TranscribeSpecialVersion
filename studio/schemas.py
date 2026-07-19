@@ -35,12 +35,10 @@ class JobOptions(BaseModel):
             kind="local_ollama", base_url="http://127.0.0.1:11434", model="qwen2.5:7b-instruct"
         )
     )
-    enable_text_review: bool = False
     remove_chinese_periods: bool = True
     publish_mode: bool = True
     create_soft_subtitle_video: bool = True
     create_hard_subtitle_video: bool = False
-    enable_gap_recovery: bool = True
 
     @field_validator("input_path", mode="before")
     @classmethod
@@ -59,6 +57,7 @@ class JobOptions(BaseModel):
 
 class ModelListRequest(BaseModel):
     provider: ProviderSettings
+    role: Literal["asr", "translator", "text_reviewer"] | None = None
 
 
 class SavedProviderSettings(BaseModel):

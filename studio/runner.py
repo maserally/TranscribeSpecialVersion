@@ -16,10 +16,12 @@ from typing import Any
 
 import psutil
 
+from .config import DATA_DIR, ROOT
 from .languages import language_info
 from .quality import PROFILE_SETTINGS, finalize_cues, quality_summary
 from .recall import (
     accepted_recovery_rows,
+    filter_events_for_uncovered_speech,
     filter_events_for_gaps,
     merge_recovery,
     save_gap_audit,
@@ -30,10 +32,9 @@ from .schemas import JobOptions
 from .subtitles import mux_hard_subtitles, mux_soft_subtitles, write_subtitles
 from .text_review import review_cues
 from .translation import translate_cues
+from .asr_context import attach_asr_reviews
 
 
-ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT / "studio_data"
 JOBS_DIR = DATA_DIR / "jobs"
 UPLOADS_DIR = DATA_DIR / "uploads"
 GPU_LOCK = threading.Lock()
@@ -477,13 +478,19 @@ class JobManager:
         else:
             primary_path = source_path
         primary = json.loads(primary_path.read_text(encoding="utf-8"))
+        comparison_path = workdir / "model_comparison.json"
+        if comparison_path.exists():
+            primary = attach_asr_reviews(
+                primary,
+                json.loads(comparison_path.read_text(encoding="utf-8")),
+            )
 
         recovered_count = 0
+        music_recovered_count = 0
         vad_fallback_count = 0
         initial_gaps = save_gap_audit(workdir / "gaps_before_recovery.json", primary, duration)
         if (
-            options.enable_gap_recovery
-            and initial_gaps
+            initial_gaps
             and options.asr.kind == "local_whisper"
             and options.verifier_model
         ):
@@ -549,6 +556,69 @@ class JobManager:
                     primary = merge_recovery(primary, accepted)
                     recovered_count = len(primary) - before_recovery
 
+        if (
+            options.asr.kind == "local_whisper"
+            and options.verifier_model
+        ):
+            music_events = filter_events_for_uncovered_speech(
+                events,
+                primary,
+                profile["recovery_threshold"],
+                profile["nonlexical_factor"],
+            )
+            if music_events:
+                self.update(
+                    job,
+                    stage="自动复核未覆盖弱对白",
+                    progress=0.63,
+                    log=f"复核未覆盖的弱对白候选 {len(music_events)} 个",
+                )
+                music_root = workdir / "music_recovery"
+                music_root.mkdir(exist_ok=True)
+                music_events_path = music_root / "events.json"
+                music_events_path.write_text(
+                    json.dumps(music_events, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                self.run_command(
+                    job,
+                    [
+                        python, str(ROOT / "asr_stage.py"), str(media),
+                        "--events", str(music_events_path), "--workdir", str(music_root),
+                        "--model", options.asr.model, "--language", options.source_language,
+                        "--speech-threshold", str(profile["recovery_threshold"]),
+                        "--nonlexical-factor", str(max(1.0, profile["nonlexical_factor"] - 0.2)),
+                    ],
+                )
+                music_medium = music_root / "source_sentences.json"
+                if json.loads(music_medium.read_text(encoding="utf-8")):
+                    self.run_command(
+                        job,
+                        [
+                            python, str(ROOT / "large_review.py"), str(media),
+                            "--medium", str(music_medium), "--workdir", str(music_root),
+                            "--model", options.verifier_model, "--language", options.source_language,
+                        ],
+                    )
+                    music_final = json.loads(
+                        (music_root / "source_final.json").read_text(encoding="utf-8")
+                    )
+                    music_comparisons = json.loads(
+                        (music_root / "model_comparison.json").read_text(encoding="utf-8")
+                    )
+                    accepted_music = accepted_recovery_rows(
+                        music_final,
+                        music_comparisons,
+                        max(0.58, profile["consensus_threshold"]),
+                        "music_recovery_consensus",
+                    )
+                    before_music = len(primary)
+                    primary = merge_recovery(primary, accepted_music)
+                    music_recovered_count = len(primary) - before_music
+                    self.update(
+                        job,
+                        log=f"未覆盖弱对白经双模型确认补回 {music_recovered_count} 条",
+                    )
+
         self.update(job, stage="逐句翻译与否定词审计", progress=0.70)
         def translation_progress(current, total, _):
             self.checkpoint(job)
@@ -576,7 +646,7 @@ class JobManager:
             "glossary": [],
         }
         text_review_audit_path = None
-        if options.enable_text_review and translated:
+        if translated:
             self.update(job, stage="最终文本校正与全局一致性检查", progress=0.83)
 
             def text_review_progress(current, total, message):
@@ -628,6 +698,7 @@ class JobManager:
         summary = quality_summary(final_cues, duration, activity_segments=vad_segments)
         summary["profile"] = options.profile
         summary["recovered_cues"] = recovered_count
+        summary["music_recovered_cues"] = music_recovered_count
         summary["vad_fallback_segments"] = vad_fallback_count
         summary["input_duration"] = duration
         summary["source_language"] = language["name"]
@@ -684,7 +755,13 @@ class JobManager:
         job.outputs["quality_report"] = str(report_path)
         if text_review_audit_path:
             job.outputs["text_review_audit"] = str(text_review_audit_path)
-        self.update(job, status="completed", stage="处理完成", progress=1.0, log=f"二次召回补回 {recovered_count} 条")
+        self.update(
+            job,
+            status="completed",
+            stage="处理完成",
+            progress=1.0,
+            log=f"自动质量复核补回长空白 {recovered_count} 条、短弱对白 {music_recovered_count} 条",
+        )
 
     @staticmethod
     def quality_report(summary: dict[str, Any]):
@@ -717,6 +794,7 @@ class JobManager:
 - 校正安全回退：{summary['text_review_rejected_count']} 条（结构无效批次 {summary['text_review_invalid_batches']} 个）
 - 中文字幕句号：{summary['chinese_periods']} 个
 - 长空白二次召回：补回 {summary['recovered_cues']} 条
+- 自动短弱对白复核：补回 {summary.get('music_recovered_cues', 0)} 条
 - VAD 长空白兜底：复查 {summary['vad_fallback_segments']} 段
 - VAD 活动覆盖率：{summary['activity_coverage_percent']}%
 - 最长空白：{summary['longest_gap']} 秒
