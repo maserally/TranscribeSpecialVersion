@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.13.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.13.1">
 </head>
 <body>
   <main class="shell">
@@ -125,7 +125,8 @@
         <label>云端工作目录<input id="cloud-worker-dir" value="/root/subtitle-worker"></label>
       </div>
       <label><input id="cloud-worker-auto-setup" type="checkbox" checked>首次连接自动安装 Python 环境、FFmpeg 和 Whisper 运算依赖</label>
-      <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">连接并安装运算环境</button><span id="cloud-worker-status" class="muted"></span></div>
+      <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">连接并安装运算环境</button><button id="stage-cloud" type="button">无卡模式：预上传所选音轨</button><span id="cloud-worker-status" class="muted"></span></div>
+      <small class="field-help">预上传使用上方已经选择的单个视频或批量文件，在云端通过文件大小和 SHA-256 双重校验；不安装模型，也不需要 GPU。</small>
     </section>
 
     <section class="panel provider-storage">
@@ -137,11 +138,7 @@
     <section class="panel launch">
       <label>输出名称（可选）<input id="output-name" placeholder="默认使用视频文件名"><small class="field-help">只影响生成文件的名称，不会覆盖原视频</small></label>
       <label id="output-dir-wrap">指定输出文件夹（可选）<div class="model-row"><input id="output-dir" placeholder="例如 E:\字幕产物"><button id="pick-output-folder" type="button">选择文件夹</button></div><small class="field-help">留空时保存到任务目录；批量模式建议指定独立文件夹，产物不会随任务删除</small></label>
-      <div class="cloud-worker-actions">
-        <button id="stage-cloud" type="button">无卡模式预上传音轨</button>
-        <button id="start" class="primary">开始识别与翻译</button>
-      </div>
-      <small class="field-help">预上传会生成 16 kHz 单声道 FLAC，并在云端通过文件大小和 SHA-256 双重校验；校验通过后才可开卡处理。</small>
+      <button id="start" class="primary">开始识别与翻译</button>
       <p id="form-error" class="error"></p>
     </section>
 
@@ -150,6 +147,6 @@
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.13.0"></script>
+  <script src="/static/app.js?v=1.13.1"></script>
 </body>
 </html>
