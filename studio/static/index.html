@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.13.1">
+  <link rel="stylesheet" href="/static/style.css?v=1.13.2">
 </head>
 <body>
   <main class="shell">
@@ -124,9 +124,9 @@
         <label>私钥路径（与密码二选一）<input id="cloud-worker-key" placeholder="C:\Users\你\.ssh\id_ed25519"></label>
         <label>云端工作目录<input id="cloud-worker-dir" value="/root/subtitle-worker"></label>
       </div>
-      <label><input id="cloud-worker-auto-setup" type="checkbox" checked>首次连接自动安装 Python 环境、FFmpeg 和 Whisper 运算依赖</label>
+      <label><input id="cloud-worker-auto-setup" type="checkbox" checked>首次 GPU 处理时自动安装 Python 环境、FFmpeg 和 Whisper 运算依赖</label>
       <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">连接并安装运算环境</button><button id="stage-cloud" type="button">无卡模式：预上传所选音轨</button><span id="cloud-worker-status" class="muted"></span></div>
-      <small class="field-help">预上传使用上方已经选择的单个视频或批量文件，在云端通过文件大小和 SHA-256 双重校验；不安装模型，也不需要 GPU。</small>
+      <small class="field-help">预上传使用上方已经选择的单个视频或批量文件，在云端通过文件大小和 SHA-256 双重校验；不安装模型，也不需要 GPU。无卡模式下不要点击“连接并安装运算环境”。</small>
     </section>
 
     <section class="panel provider-storage">
@@ -147,6 +147,6 @@
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.13.1"></script>
+  <script src="/static/app.js?v=1.13.2"></script>
 </body>
 </html>
