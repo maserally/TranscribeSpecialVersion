@@ -37,6 +37,7 @@ from .schemas import (
     CloudWorkerRequest,
     CloudWorkerSettings,
     FolderBatchRequest,
+    FolderPickerRequest,
     FolderScanRequest,
     JobOptions,
     ModelListRequest,
@@ -50,7 +51,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.8.0")
+app = FastAPI(title="字幕翻译工作室", version="1.9.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -231,6 +232,40 @@ def scan_media_folder(request: FolderScanRequest):
         "count": len(files),
         "files": [{"name": path.name, "path": str(path)} for path in files],
     }
+
+
+def _choose_local_folder(initial_dir: str = "", title: str = "选择文件夹") -> str:
+    if not ALLOW_LOCAL_OPEN:
+        raise HTTPException(status_code=409, detail="当前运行模式不能打开服务器端文件夹选择器")
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        try:
+            root.withdraw()
+            root.attributes("-topmost", True)
+            root.update()
+            initial = Path(initial_dir).expanduser() if initial_dir else None
+            selected = filedialog.askdirectory(
+                parent=root,
+                title=title[:60] or "选择文件夹",
+                initialdir=str(initial) if initial and initial.is_dir() else None,
+                mustexist=False,
+            )
+        finally:
+            root.destroy()
+        return str(Path(selected).resolve()) if selected else ""
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"无法打开系统文件夹选择器：{exc}") from exc
+
+
+@app.post("/api/local/pick-folder")
+def pick_local_folder(request: FolderPickerRequest):
+    selected = _choose_local_folder(request.initial_dir, request.title)
+    return {"path": selected, "cancelled": not bool(selected)}
 
 
 @app.post("/api/jobs/batch")

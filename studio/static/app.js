@@ -31,6 +31,8 @@ function cleanFolderField(id){const input=$(id);input.value=cleanInputPath(input
 $('#input-folder').addEventListener('blur',()=>cleanFolderField('#input-folder'));$('#output-dir').addEventListener('blur',()=>cleanFolderField('#output-dir'));
 async function scanInputFolder(){const status=$('#folder-scan-status'),input_dir=cleanFolderField('#input-folder');if(!input_dir){status.textContent='请先填写视频文件夹';return null}status.textContent='正在扫描…';try{const data=await jsonFetch('/api/media/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input_dir})});status.textContent=data.count?`找到 ${data.count} 个视频：${data.files.slice(0,6).map(x=>x.name).join('、')}${data.count>6?'…':''}`:'该文件夹第一层没有支持的视频文件';return data}catch(e){status.textContent=`扫描失败：${e.message}`;return null}}
 $('#scan-input-folder').onclick=scanInputFolder;
+async function pickLocalFolder(target,title,scanAfter=false){const button=target==='#input-folder'?$('#pick-input-folder'):$('#pick-output-folder');button.disabled=true;try{const data=await jsonFetch('/api/local/pick-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initial_dir:$(target).value,title})});if(!data.cancelled&&data.path){$(target).value=data.path;if(scanAfter)await scanInputFolder()}}catch(e){$('#form-error').textContent=`选择文件夹失败：${e.message}`}finally{button.disabled=false}}
+$('#pick-input-folder').onclick=()=>pickLocalFolder('#input-folder','选择包含视频的文件夹',true);$('#pick-output-folder').onclick=()=>pickLocalFolder('#output-dir','选择字幕和视频产物输出文件夹');
 
 async function init(){
   runtimeInfo=await jsonFetch('/api/runtime');
@@ -41,6 +43,7 @@ async function init(){
     $$('.tab').forEach(x=>x.classList.toggle('active',x.dataset.mode==='upload'));
     $$('.source-view').forEach(x=>x.classList.toggle('active',x.id==='upload-source'));
     $('#soft-video').checked=false;$('#hard-video').checked=false;
+    $('#output-dir-wrap').classList.add('hidden');
     $('#cloud-worker-panel').classList.add('hidden');
     $('#provider-storage-title').textContent='6. 云端接口配置';
     $('#provider-storage-help').textContent='模型与 Base URL 保存到云端数据目录；API Key 不写入磁盘，请使用 SUBTITLE_ASR_API_KEY、SUBTITLE_TRANSLATOR_API_KEY 和 SUBTITLE_REVIEWER_API_KEY 环境变量。';

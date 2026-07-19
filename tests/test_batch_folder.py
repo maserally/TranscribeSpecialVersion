@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from studio.main import _video_files_in, app, create_folder_jobs
+from studio.main import _choose_local_folder, _video_files_in, app, create_folder_jobs
 from studio.schemas import FolderBatchRequest, JobOptions
 
 
@@ -77,6 +77,14 @@ class BatchFolderTests(unittest.TestCase):
         paths = {route.path for route in app.routes}
         self.assertIn("/api/media/folder", paths)
         self.assertIn("/api/jobs/batch", paths)
+        self.assertIn("/api/local/pick-folder", paths)
+
+    def test_folder_picker_is_blocked_outside_local_mode(self):
+        with patch("studio.main.ALLOW_LOCAL_OPEN", False), self.assertRaises(
+            HTTPException
+        ) as raised:
+            _choose_local_folder()
+        self.assertEqual(raised.exception.status_code, 409)
 
 
 if __name__ == "__main__":

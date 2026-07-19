@@ -76,6 +76,16 @@ class FolderScanRequest(BaseModel):
         return JobOptions.clean_input_path(value)
 
 
+class FolderPickerRequest(BaseModel):
+    initial_dir: str = ""
+    title: str = "选择文件夹"
+
+    @field_validator("initial_dir", mode="before")
+    @classmethod
+    def clean_initial_dir(cls, value):
+        return JobOptions.clean_input_path(value)
+
+
 class FolderBatchRequest(BaseModel):
     input_dir: str
     output_dir: str = ""
