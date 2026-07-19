@@ -28,6 +28,7 @@ from .recall import (
 from .remote_asr import run_remote_asr
 from .schemas import JobOptions
 from .subtitles import mux_hard_subtitles, mux_soft_subtitles, write_subtitles
+from .text_review import review_cues
 from .translation import translate_cues
 
 
@@ -79,6 +80,7 @@ class JobState:
         safe_options = self.options.model_dump()
         safe_options["asr"]["api_key"] = ""
         safe_options["translator"]["api_key"] = ""
+        safe_options["text_reviewer"]["api_key"] = ""
         return {
             "id": self.id,
             "status": self.status,
@@ -552,7 +554,7 @@ class JobManager:
             self.checkpoint(job)
             self.update(
                 job,
-                progress=0.70 + 0.16 * current / max(1, total),
+                progress=0.70 + 0.12 * current / max(1, total),
                 log=(f"翻译 {current}/{total}" if current % 10 == 0 else None),
             )
 
@@ -563,6 +565,45 @@ class JobManager:
             source_language=options.source_language,
             target_language=options.target_language,
         )
+        text_review_audit = {
+            "enabled": False,
+            "cue_count": len(translated),
+            "changed_count": 0,
+            "rejected_count": 0,
+            "invalid_batches": 0,
+            "changes": [],
+            "rejected": [],
+            "glossary": [],
+        }
+        text_review_audit_path = None
+        if options.enable_text_review and translated:
+            self.update(job, stage="最终文本校正与全局一致性检查", progress=0.83)
+
+            def text_review_progress(current, total, message):
+                self.checkpoint(job)
+                self.update(
+                    job,
+                    progress=0.83 + 0.05 * current / max(1, total),
+                    log=message,
+                )
+
+            translated, text_review_audit = review_cues(
+                translated,
+                options.text_reviewer,
+                text_review_progress,
+                source_language=options.source_language,
+            )
+            text_review_audit_path = output_dir / f"{stem}_最终文本校正记录.json"
+            text_review_audit_path.write_text(
+                json.dumps(text_review_audit, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self.update(
+                job,
+                log=(
+                    f"最终文本校正完成：修改 {text_review_audit['changed_count']} 条，"
+                    f"安全回退 {text_review_audit['rejected_count']} 条"
+                ),
+            )
         review_cues = finalize_cues(
             translated,
             min_duration=0.85,
@@ -602,6 +643,11 @@ class JobManager:
         ]
         summary["translation_warning_count"] = len(warning_items)
         summary["translation_warning_items"] = warning_items[:100]
+        summary["text_review_enabled"] = bool(text_review_audit["enabled"])
+        summary["text_review_model"] = text_review_audit.get("model", "")
+        summary["text_review_changed_count"] = text_review_audit["changed_count"]
+        summary["text_review_rejected_count"] = text_review_audit["rejected_count"]
+        summary["text_review_invalid_batches"] = text_review_audit["invalid_batches"]
         report_path = output_dir / f"{stem}_自动质量报告.md"
         report_path.write_text(self.quality_report(summary), encoding="utf-8")
 
@@ -636,10 +682,15 @@ class JobManager:
             for name, path in files.items():
                 job.outputs[f"{prefix}_{name}"] = str(path)
         job.outputs["quality_report"] = str(report_path)
+        if text_review_audit_path:
+            job.outputs["text_review_audit"] = str(text_review_audit_path)
         self.update(job, status="completed", stage="处理完成", progress=1.0, log=f"二次召回补回 {recovered_count} 条")
 
     @staticmethod
     def quality_report(summary: dict[str, Any]):
+        text_review_status = "已启用" if summary["text_review_enabled"] else "未启用"
+        if summary["text_review_model"]:
+            text_review_status += f"（{summary['text_review_model']}）"
         gaps = "\n".join(
             f"- {x['start']:.2f} ～ {x['end']:.2f}（{x['duration']:.2f} 秒，"
             f"其中 VAD 活动 {x.get('activity_seconds', 0):.2f} 秒）"
@@ -661,6 +712,9 @@ class JobManager:
 - 时间轴重叠：{summary['overlaps']} 处
 - 未确认占位符：{summary['placeholders']} 处
 - 翻译审计警告：{summary['translation_warning_count']} 条（校对版以“【需校对】”标出）
+- 最终文本校正：{text_review_status}
+- 校正实际修改：{summary['text_review_changed_count']} 条
+- 校正安全回退：{summary['text_review_rejected_count']} 条（结构无效批次 {summary['text_review_invalid_batches']} 个）
 - 中文字幕句号：{summary['chinese_periods']} 个
 - 长空白二次召回：补回 {summary['recovered_cues']} 条
 - VAD 长空白兜底：复查 {summary['vad_fallback_segments']} 段

@@ -10,7 +10,7 @@ from studio.main import app
 from studio.providers import supports_segment_timestamps
 from studio.remote_asr import _remote_packs
 from studio.runner import JobControl, JobManager, JobState
-from studio.schemas import JobOptions
+from studio.schemas import JobOptions, ProviderSettings
 from studio.settings_store import load_provider_settings, save_provider_settings
 
 
@@ -100,6 +100,22 @@ class TaskManagementTests(unittest.TestCase):
         self.assertIn("/api/jobs/{job_id}/resume", paths)
         self.assertIn("/api/jobs/{job_id}/cancel", paths)
 
+    def test_task_status_hides_all_provider_api_keys(self):
+        options = JobOptions(
+            input_path="movie.mp4",
+            asr=ProviderSettings(kind="openai_compatible", api_key="asr-secret", model="asr"),
+            translator=ProviderSettings(
+                kind="openai_compatible", api_key="translator-secret", model="translator"
+            ),
+            text_reviewer=ProviderSettings(
+                kind="openai_compatible", api_key="review-secret", model="reviewer"
+            ),
+        )
+        public = JobState(id="secret-test", options=options).public()
+        self.assertEqual(public["options"]["asr"]["api_key"], "")
+        self.assertEqual(public["options"]["translator"]["api_key"], "")
+        self.assertEqual(public["options"]["text_reviewer"]["api_key"], "")
+
     def test_provider_settings_are_local_and_api_keys_are_not_plaintext(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "provider_settings.json"
@@ -118,15 +134,23 @@ class TaskManagementTests(unittest.TestCase):
                             "api_key": "secret-translator-key",
                             "model": "translator-model",
                         },
+                        "text_reviewer": {
+                            "kind": "openai_compatible",
+                            "base_url": "https://review.example.com/v1",
+                            "api_key": "secret-review-key",
+                            "model": "review-model",
+                        },
                         "verifier_model": "large-v3",
                     }
                 )
                 raw = path.read_text(encoding="utf-8")
                 self.assertNotIn("secret-asr-key", raw)
                 self.assertNotIn("secret-translator-key", raw)
+                self.assertNotIn("secret-review-key", raw)
                 loaded = load_provider_settings()
                 self.assertEqual(loaded["asr"]["api_key"], "secret-asr-key")
                 self.assertEqual(loaded["translator"]["model"], "translator-model")
+                self.assertEqual(loaded["text_reviewer"]["api_key"], "secret-review-key")
 
     def test_gpt4o_transcribe_uses_one_vad_window_per_request(self):
         windows = [

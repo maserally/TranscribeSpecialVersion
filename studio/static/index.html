@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.4.1">
+  <link rel="stylesheet" href="/static/style.css?v=1.5.0">
 </head>
 <body>
   <main class="shell">
@@ -51,12 +51,13 @@
         <label title="对较长无字幕区间重新检查临界人声，并要求双模型一致"><input id="gap-recovery" type="checkbox" checked>长空白二次召回 <em>减少轻声对白漏识别</em></label>
         <label title="移除中文行末的全角句号，问号和感叹号仍保留"><input id="remove-periods" type="checkbox" checked>中文字幕不带句号 <em>只移除。</em></label>
         <label title="隐藏【听不清】等内部占位符，生成适合直接观看的字幕"><input id="publish-mode" type="checkbox" checked>生成观看版 <em>清理内部占位符</em></label>
+        <label title="翻译完成后使用独立模型做上下文校正，保持字幕条数和时间轴不变"><input id="enable-text-review" type="checkbox">启用最终文本校正 <em>统一人名术语并复核错译</em></label>
         <label title="把字幕作为可开关的轨道封装进 MP4，不重编码画面"><input id="soft-video" type="checkbox" checked>生成软字幕视频 <em>速度快、可开关</em></label>
         <label title="将字幕永久烧录到画面，需要重新编码整部视频"><input id="hard-video" type="checkbox">生成硬字幕视频 <em>兼容性高、耗时较长</em></label>
       </div>
     </section>
 
-    <section class="columns">
+    <section class="provider-grid">
       <div class="panel provider" id="asr-panel">
         <h2 id="asr-title">3. 日语识别模型</h2>
         <label>提供方
@@ -84,10 +85,23 @@
         </div>
         <label>翻译模型<div class="model-row"><select id="translator-model"></select><button type="button" id="refresh-translator">刷新模型</button></div><input id="translator-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="translator-model-help" class="field-help">逐句翻译为中文，并额外审计否定、制止和等待等高风险语义</small></label>
       </div>
+
+      <div class="panel provider" id="text-reviewer-panel">
+        <h2>5. 最终文本校正模型</h2>
+        <label>提供方
+          <select id="text-reviewer-kind"><option value="local_ollama">本地 Ollama</option><option value="openai_compatible">OpenAI 兼容接口</option></select>
+          <small class="field-help">独立于翻译模型，可用本地或云端模型校正识别文本、译文和全片术语一致性</small>
+        </label>
+        <label>Base URL<input id="text-reviewer-url" value="http://127.0.0.1:11434"><small class="field-help">Ollama 默认地址为 http://127.0.0.1:11434；兼容服务通常以 /v1 结尾</small></label>
+        <div class="remote-fields hidden" data-for="text-reviewer">
+          <label>API Key<input id="text-reviewer-key" type="password" autocomplete="off"><small class="field-help">使用 Windows 当前用户加密保存，不写入任务记录或 Git</small></label>
+        </div>
+        <label>校正模型<div class="model-row"><select id="text-reviewer-model"></select><button type="button" id="refresh-text-reviewer">刷新模型</button></div><input id="text-reviewer-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="text-reviewer-model-help" class="field-help">按批次读取前后文，只修改文字，不修改字幕 ID、条数和时间轴</small></label>
+      </div>
     </section>
 
     <section class="panel provider-storage">
-      <div><h2>5. 本地接口配置</h2><p class="muted">保存到 studio_data/settings/provider_settings.json；API Key 使用当前 Windows 用户的 DPAPI 加密，文件不会提交到 Git。</p></div>
+      <div><h2>6. 本地接口配置</h2><p class="muted">识别、翻译和校正配置保存到 studio_data/settings/provider_settings.json；API Key 使用当前 Windows 用户的 DPAPI 加密，文件不会提交到 Git。</p></div>
       <button id="save-provider-settings">保存接口配置</button>
       <span id="provider-save-status" class="muted"></span>
     </section>
@@ -103,6 +117,6 @@
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.4.1"></script>
+  <script src="/static/app.js?v=1.5.0"></script>
 </body>
 </html>

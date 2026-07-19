@@ -30,6 +30,12 @@ class JobOptions(BaseModel):
             kind="local_ollama", base_url="http://127.0.0.1:11434", model="qwen2.5:7b-instruct"
         )
     )
+    text_reviewer: ProviderSettings = Field(
+        default_factory=lambda: ProviderSettings(
+            kind="local_ollama", base_url="http://127.0.0.1:11434", model="qwen2.5:7b-instruct"
+        )
+    )
+    enable_text_review: bool = False
     remove_chinese_periods: bool = True
     publish_mode: bool = True
     create_soft_subtitle_video: bool = True
@@ -58,4 +64,9 @@ class ModelListRequest(BaseModel):
 class SavedProviderSettings(BaseModel):
     asr: ProviderSettings
     translator: ProviderSettings
+    text_reviewer: ProviderSettings = Field(
+        default_factory=lambda: ProviderSettings(
+            kind="local_ollama", base_url="http://127.0.0.1:11434", model="qwen2.5:7b-instruct"
+        )
+    )
     verifier_model: str = "large-v3"

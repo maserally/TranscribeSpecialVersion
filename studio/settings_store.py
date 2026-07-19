@@ -75,13 +75,14 @@ def load_provider_settings() -> dict[str, Any]:
     defaults = {
         "asr": {"kind": "local_whisper", "base_url": "https://api.openai.com/v1", "api_key": "", "model": "medium"},
         "translator": {"kind": "local_ollama", "base_url": "http://127.0.0.1:11434", "api_key": "", "model": "qwen2.5:7b-instruct"},
+        "text_reviewer": {"kind": "local_ollama", "base_url": "http://127.0.0.1:11434", "api_key": "", "model": "qwen2.5:7b-instruct"},
         "verifier_model": "large-v3",
     }
     if not SETTINGS_PATH.exists():
         return defaults
     try:
         stored = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        for name in ("asr", "translator"):
+        for name in ("asr", "translator", "text_reviewer"):
             section = stored.get(name, {})
             defaults[name].update(
                 {key: str(section.get(key, defaults[name][key])) for key in ("kind", "base_url", "model")}
@@ -94,8 +95,8 @@ def load_provider_settings() -> dict[str, Any]:
 
 
 def save_provider_settings(settings: dict[str, Any]) -> Path:
-    stored: dict[str, Any] = {"version": 1}
-    for name in ("asr", "translator"):
+    stored: dict[str, Any] = {"version": 2}
+    for name in ("asr", "translator", "text_reviewer"):
         section = settings.get(name, {})
         stored[name] = {
             "kind": str(section.get("kind", "")),

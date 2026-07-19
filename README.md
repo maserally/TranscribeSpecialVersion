@@ -8,7 +8,7 @@
 2. 确认 `ffmpeg` 和 `ffprobe` 已加入 PATH。
 3. 双击 `启动字幕工作室.bat`，浏览器会自动打开 `http://127.0.0.1:8765`。
 4. 选择浏览器上传，或直接填写本机视频绝对路径。
-5. 选择日语或韩语、识别/复核/翻译模型以及质量档位后创建任务。
+5. 选择日语或韩语、识别/复核/翻译模型以及质量档位；需要时启用独立的最终文本校正模型后创建任务。
 
 任务按单 GPU 队列依次执行。任务页会显示阶段日志，日志或错误详情展开后不会因自动刷新而收起；排队或运行中的任务可暂停、继续或取消，结束后可永久删除。任务产物提供中文字幕、原文字幕、双语字幕、结构化 JSON、质量报告以及软／硬字幕视频的本地打开按钮，也可以直接打开产物文件夹。软字幕可在播放器中开关且封装很快；硬字幕会重编码画面，耗时更长，但兼容不支持外挂字幕的设备。
 
@@ -17,8 +17,10 @@
 - 源语言：日语或韩语，统一翻译为简体中文。
 - 本地识别：Whisper `small`、`medium`、`large-v3` 等已缓存模型。
 - 本地翻译：Ollama 模型，可从本机 `/api/tags` 自动读取。
-- OpenAI 兼容识别：调用 `/v1/audio/transcriptions`；服务必须返回带片段时间戳的 `verbose_json.segments`，否则无法还原视频时间轴。
+- 本地校正：独立选择 Ollama 模型，在翻译完成后按批次读取前后文并统一人名、术语、代词与语气。
+- OpenAI 兼容识别：调用 `/v1/audio/transcriptions`；优先读取 `verbose_json.segments` 精细时间戳，仅返回普通 JSON 的模型使用 VAD 窗口级近似时间轴。
 - OpenAI 兼容翻译：调用 `/v1/chat/completions`，并通过 `/v1/models` 获取可选模型。
+- OpenAI 兼容校正：同样调用 `/v1/chat/completions`，但提供方、Base URL、API Key 和模型均可与翻译独立配置。
 - Base URL、API Key 和模型可以保存到 `studio_data/settings/provider_settings.json`，API Key 在 Windows 上用当前用户的 DPAPI 加密；任务状态文件仍会清空密钥，整个 `studio_data/` 不进入 Git。
 - 远程 ASR 若返回 `verbose_json.segments`，软件会使用模型提供的精细时间轴；`gpt-4o-transcribe` 等仅返回普通 JSON 的模型会改为逐个 VAD 窗口请求，并使用窗口级近似时间轴。
 
@@ -59,7 +61,8 @@ python -m uvicorn studio.main:app --host 127.0.0.1 --port 8765
 4. `large_review.py`：只对 medium 保留的对白使用 Whisper large-v3 复核，避免全片运行 large-v3 的巨大开销。
 5. `studio/recall.py`：扫描较长无字幕区间；均衡／召回模式还会复查声音事件门控漏掉、但 VAD 确认有活动的片段，所有补回结果仍必须通过双模型一致性。
 6. `studio/translation.py`：按源语言逐句翻译，每次只允许返回一个目标句，并参考前后四句及已确认译文。日语审计 `やめて`、`待って`、`抜けちゃった`、`入れます` 等表达，韩语审计 `하지 마`、`그만해`、`기다려` 等表达；发现源语言字符残留时会执行专项修复。
-7. `studio/quality.py` 与 `studio/subtitles.py`：消除相邻重复、合并密集碎片、修复重叠、统计 VAD 活动覆盖率、执行发布清理，并生成字幕和软／硬字幕视频。
+7. `studio/text_review.py`（可选）：使用独立本地或云端模型分批校正源文和中文，滚动维护人名/术语表；严格验证字幕 ID 与数量，不允许模型修改时间轴，异常结果自动回退。
+8. `studio/quality.py` 与 `studio/subtitles.py`：消除相邻重复、合并密集碎片、修复重叠、统计 VAD 活动覆盖率、执行发布清理，并生成字幕和软／硬字幕视频。
 
 ## 关键设计
 
