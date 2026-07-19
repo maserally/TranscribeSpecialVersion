@@ -50,6 +50,38 @@ class TaskManagementTests(unittest.TestCase):
                 self.assertFalse(started.options.cloud_stage_only)
                 self.assertEqual(started.cloud_worker_settings.host, "gpu.example.com")
 
+    def test_failed_preupload_can_be_retried_without_new_job_id(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with patch("studio.runner.JOBS_DIR", root / "jobs"), patch(
+                "studio.runner.UPLOADS_DIR", root / "uploads"
+            ):
+                manager = JobManager()
+                job = JobState(
+                    id="failed-stage-job",
+                    options=JobOptions(input_path="movie.mp4", cloud_stage_only=True),
+                    status="failed",
+                    stage="处理失败",
+                    error="EOFError",
+                )
+                manager.jobs[job.id] = job
+                finished = threading.Event()
+                with patch.object(manager, "_run_guarded", side_effect=lambda _job: finished.set()):
+                    retried = manager.retry_staged_upload(
+                        job.id,
+                        CloudWorkerSettings(
+                            enabled=True,
+                            host="gpu.example.com",
+                            password="secret",
+                        ),
+                    )
+                    self.assertTrue(finished.wait(2))
+
+                self.assertEqual(retried.id, "failed-stage-job")
+                self.assertEqual(retried.status, "queued")
+                self.assertTrue(retried.options.cloud_stage_only)
+                self.assertEqual(retried.error, "")
+
     def test_pause_and_resume_a_real_child_process(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -138,7 +170,9 @@ class TaskManagementTests(unittest.TestCase):
         self.assertIn("/api/jobs/actions/cancel-all", paths)
         self.assertIn("/api/jobs/actions/delete-finished", paths)
         self.assertIn("/api/jobs/actions/start-staged-all", paths)
+        self.assertIn("/api/jobs/actions/retry-stage-failed", paths)
         self.assertIn("/api/jobs/{job_id}/start-staged", paths)
+        self.assertIn("/api/jobs/{job_id}/retry-stage", paths)
 
     def test_bulk_actions_only_target_eligible_job_states(self):
         class FakeManager:

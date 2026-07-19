@@ -52,7 +52,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.13.2")
+app = FastAPI(title="字幕翻译工作室", version="1.13.3")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -461,6 +461,34 @@ def start_all_staged_jobs():
     }
 
 
+@app.post("/api/jobs/actions/retry-stage-failed")
+def retry_failed_staged_uploads():
+    saved = load_provider_settings(expose_secrets=True)
+    worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    if not worker.enabled:
+        raise HTTPException(status_code=400, detail="请先启用并保存云 GPU 运算单元配置")
+    targets = [
+        job["id"]
+        for job in manager.list()
+        if job["status"] == "failed" and job["options"].get("cloud_stage_only")
+    ]
+    succeeded = []
+    failed = []
+    for job_id in targets:
+        try:
+            manager.retry_staged_upload(job_id, worker)
+            succeeded.append(job_id)
+        except (KeyError, RuntimeError) as exc:
+            failed.append({"id": job_id, "error": str(exc)})
+    return {
+        "ok": not failed,
+        "action": "retry-stage-failed",
+        "count": len(succeeded),
+        "succeeded": succeeded,
+        "failed": failed,
+    }
+
+
 @app.delete("/api/jobs/actions/delete-finished")
 def delete_finished_jobs():
     return _bulk_job_action("delete", {"completed", "failed", "canceled"})
@@ -482,6 +510,20 @@ def start_staged_job(job_id: str):
         raise HTTPException(status_code=400, detail="请先启用并保存云 GPU 运算单元配置")
     try:
         return manager.start_staged(job_id, worker).public()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/jobs/{job_id}/retry-stage")
+def retry_staged_job(job_id: str):
+    saved = load_provider_settings(expose_secrets=True)
+    worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    if not worker.enabled:
+        raise HTTPException(status_code=400, detail="请先启用并保存云 GPU 运算单元配置")
+    try:
+        return manager.retry_staged_upload(job_id, worker).public()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="任务不存在") from exc
     except RuntimeError as exc:

@@ -170,6 +170,24 @@ class JobManager:
         threading.Thread(target=self._run_guarded, args=(job,), daemon=True).start()
         return job
 
+    def retry_staged_upload(
+        self, job_id: str, cloud_worker_settings: CloudWorkerSettings
+    ):
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                raise KeyError(job_id)
+            if job.status != "failed" or not job.options.cloud_stage_only:
+                raise RuntimeError("只有失败的无卡预上传任务可以重试")
+            job.cloud_worker_settings = cloud_worker_settings
+            job.status = "queued"
+            job.stage = "等待断点续传"
+            job.error = ""
+            self.controls[job.id] = JobControl()
+        self.update(job, log="重新连接云节点，将校验已有临时分片并断点续传")
+        threading.Thread(target=self._run_guarded, args=(job,), daemon=True).start()
+        return job
+
     def get(self, job_id: str):
         return self.jobs.get(job_id)
 
@@ -383,7 +401,10 @@ class JobManager:
                     job.cloud_session = None
             cloud_audio = (JOBS_DIR / job.id / "work" / "cloud_audio.flac").resolve()
             expected_workdir = (JOBS_DIR / job.id / "work").resolve()
-            if cloud_audio.parent == expected_workdir and job.status != "staged":
+            preserve_staged_audio = job.status == "staged" or (
+                job.status == "failed" and job.options.cloud_stage_only
+            )
+            if cloud_audio.parent == expected_workdir and not preserve_staged_audio:
                 cloud_audio.unlink(missing_ok=True)
             if acquired:
                 GPU_LOCK.release()

@@ -22,7 +22,7 @@ class CloudWorkerTests(unittest.TestCase):
             worker.logger = MagicMock()
             size, digest = worker._local_file_info(audio)
             worker._remote_file_info = MagicMock(side_effect=[None, (size, digest)])
-            worker._upload = MagicMock()
+            worker._upload_resumable = MagicMock()
             worker._exec = MagicMock(return_value="")
 
             result = worker._ensure_verified_audio(audio)
@@ -30,16 +30,36 @@ class CloudWorkerTests(unittest.TestCase):
             self.assertEqual(result["size"], size)
             self.assertEqual(result["sha256"], digest)
             self.assertFalse(result["reused"])
-            worker._upload.assert_called_once()
+            worker._upload_resumable.assert_called_once()
             publish_command = worker._exec.call_args_list[-1].args[0]
             self.assertIn("audio.flac.uploading", publish_command)
             self.assertIn("audio.ready.json", publish_command)
 
             worker._remote_file_info = MagicMock(return_value=(size, digest))
-            worker._upload.reset_mock()
+            worker._upload_resumable.reset_mock()
             reused = worker._ensure_verified_audio(audio)
             self.assertTrue(reused["reused"])
-            worker._upload.assert_not_called()
+            worker._upload_resumable.assert_not_called()
+
+    def test_interrupted_audio_upload_reconnects_and_resumes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            audio = Path(folder) / "audio.flac"
+            audio.write_bytes(b"resumable-audio" * 1024)
+            worker = object.__new__(CloudWhisperWorker)
+            worker.remote_job_dir = "/root/subtitle-worker/jobs/test"
+            worker.checkpoint = lambda: None
+            worker.logger = MagicMock()
+            size, digest = worker._local_file_info(audio)
+            worker._remote_file_info = MagicMock(side_effect=[None, (size, digest)])
+            worker._upload_resumable = MagicMock(side_effect=[EOFError(), None])
+            worker._reconnect = MagicMock()
+            worker._exec = MagicMock(return_value="")
+
+            result = worker._ensure_verified_audio(audio)
+
+            self.assertEqual(result["sha256"], digest)
+            self.assertEqual(worker._upload_resumable.call_count, 2)
+            worker._reconnect.assert_called_once()
 
     def test_corrupt_audio_upload_retries_three_times_and_is_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -52,13 +72,13 @@ class CloudWorkerTests(unittest.TestCase):
             worker._remote_file_info = MagicMock(
                 side_effect=[None, (1, "0" * 64), (1, "1" * 64), (1, "2" * 64)]
             )
-            worker._upload = MagicMock()
+            worker._upload_resumable = MagicMock()
             worker._exec = MagicMock(return_value="")
 
             with self.assertRaises(CloudWorkerError):
                 worker._ensure_verified_audio(audio)
 
-            self.assertEqual(worker._upload.call_count, 3)
+            self.assertEqual(worker._upload_resumable.call_count, 3)
 
     def test_controllable_remote_command_waits_for_setsid_child(self):
         class FakeChannel:

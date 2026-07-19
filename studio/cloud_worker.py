@@ -90,11 +90,17 @@ class CloudWhisperWorker:
 
     def close(self):
         if self.sftp:
-            self.sftp.close()
-            self.sftp = None
+            try:
+                self.sftp.close()
+            except (EOFError, OSError):
+                pass
+            finally:
+                self.sftp = None
         if self.client:
-            self.client.close()
-            self.client = None
+            try:
+                self.client.close()
+            finally:
+                self.client = None
 
     def _exec(
         self,
@@ -252,6 +258,19 @@ touch {remote}/.worker-ready-v2
                 digest.update(chunk)
         return size, digest.hexdigest()
 
+    def _local_prefix_sha256(self, local_path: Path, length: int) -> str:
+        remaining = length
+        digest = hashlib.sha256()
+        with local_path.open("rb") as stream:
+            while remaining:
+                self.checkpoint()
+                chunk = stream.read(min(8 * 1024 * 1024, remaining))
+                if not chunk:
+                    raise CloudWorkerError("本地音轨长度在上传期间发生变化")
+                digest.update(chunk)
+                remaining -= len(chunk)
+        return digest.hexdigest()
+
     def _remote_file_info(self, remote_path: str) -> tuple[int, str] | None:
         quoted = shlex.quote(remote_path)
         output = self._exec(
@@ -264,6 +283,47 @@ touch {remote}/.worker-ready-v2
         if len(lines) != 2 or not lines[0].isdigit() or not re.fullmatch(r"[0-9a-f]{64}", lines[1]):
             raise CloudWorkerError("云端文件校验结果格式异常")
         return int(lines[0]), lines[1]
+
+    def _upload_resumable(self, local_path: Path, remote_path: str, label: str):
+        if not self.sftp:
+            raise CloudWorkerError("云节点文件通道尚未连接")
+        size = local_path.stat().st_size
+        try:
+            remote_size = self.sftp.stat(remote_path).st_size
+        except FileNotFoundError:
+            remote_size = 0
+        if remote_size > size:
+            self._exec("rm -f -- " + shlex.quote(remote_path), timeout=30)
+            remote_size = 0
+        elif remote_size:
+            remote_info = self._remote_file_info(remote_path)
+            local_prefix = self._local_prefix_sha256(local_path, remote_size)
+            if remote_info != (remote_size, local_prefix):
+                self.logger("云端临时分片前缀校验失败，丢弃后从头重传")
+                self._exec("rm -f -- " + shlex.quote(remote_path), timeout=30)
+                remote_size = 0
+            elif remote_size < size:
+                self.logger(f"检测到完整临时分片，从 {remote_size / 1024 / 1024:.1f} MB 处断点续传")
+
+        sent = remote_size
+        last_percent = int(sent * 100 / max(1, size)) - 10
+        with local_path.open("rb") as source:
+            source.seek(remote_size)
+            with self.sftp.file(remote_path, "ab" if remote_size else "wb") as target:
+                target.set_pipelined(True)
+                while chunk := source.read(1024 * 1024):
+                    self.checkpoint()
+                    target.write(chunk)
+                    sent += len(chunk)
+                    percent = int(sent * 100 / max(1, size))
+                    if percent >= last_percent + 10 or percent == 100:
+                        last_percent = percent
+                        self.logger(f"{label} {percent}%")
+
+    def _reconnect(self):
+        self.close()
+        time.sleep(1)
+        self.connect()
 
     def _ensure_verified_audio(self, audio_path: Path) -> dict[str, object]:
         if not self.remote_job_dir:
@@ -279,9 +339,23 @@ touch {remote}/.worker-ready-v2
 
         for attempt in range(1, 4):
             self.checkpoint()
-            self._exec("rm -f -- " + shlex.quote(remote_part), timeout=30)
-            self._upload(audio_path, remote_part, f"上传音轨（第 {attempt}/3 次）")
-            remote_info = self._remote_file_info(remote_part)
+            try:
+                self._upload_resumable(
+                    audio_path,
+                    remote_part,
+                    f"上传音轨（连接尝试 {attempt}/3）",
+                )
+                remote_info = self._remote_file_info(remote_part)
+            except (EOFError, OSError, _paramiko().SSHException) as exc:
+                if attempt == 3:
+                    raise CloudWorkerError(
+                        f"音轨上传连续 3 次连接中断：{type(exc).__name__}"
+                    ) from exc
+                self.logger(
+                    f"上传连接中断（{type(exc).__name__}），正在重连并从已校验分片继续"
+                )
+                self._reconnect()
+                continue
             if remote_info == expected:
                 manifest = json.dumps(
                     {"version": 1, "size": local_size, "sha256": local_sha256},
@@ -297,7 +371,7 @@ touch {remote}/.worker-ready-v2
                 self._exec(command, timeout=30)
                 self.logger(f"音轨校验通过 · {local_size / 1024 / 1024:.1f} MB · SHA-256 {local_sha256[:12]}…")
                 return {"size": local_size, "sha256": local_sha256, "reused": False}
-            self.logger(f"音轨校验失败，第 {attempt}/3 次传输不完整，准备重传")
+            self.logger(f"音轨校验失败，第 {attempt}/3 次传输不完整，准备校验分片并续传")
 
         self._exec("rm -f -- " + shlex.quote(remote_part), timeout=30)
         raise CloudWorkerError("音轨连续 3 次未通过文件大小与 SHA-256 校验，已拒绝进入识别阶段")
