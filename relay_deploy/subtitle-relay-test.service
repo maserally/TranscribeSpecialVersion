@@ -1,0 +1,23 @@
+[Unit]
+Description=Subtitle relay speed test service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/subtitle-relay-test
+EnvironmentFile=/etc/subtitle-relay-test.env
+ExecStart=/usr/bin/python3 /opt/subtitle-relay-test/relay_speed_test.py serve --host 0.0.0.0 --port 8766 --storage /var/lib/subtitle-relay-test --max-size-mb 2048
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/subtitle-relay-test
+
+[Install]
+WantedBy=multi-user.target
