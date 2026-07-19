@@ -11,7 +11,7 @@ import whisper
 
 from asr_stage import HALLUCINATIONS, pack_windows, select_windows
 
-from .providers import OpenAICompatibleProvider
+from .providers import OpenAICompatibleProvider, supports_segment_timestamps
 from .schemas import ProviderSettings
 
 
@@ -47,6 +47,14 @@ def _split_segment(row: dict[str, Any]):
     return output
 
 
+def _remote_packs(windows: list[dict[str, Any]], timestamped: bool):
+    if timestamped:
+        return pack_windows(windows, max_audio=24.0, separator=0.8)
+    # JSON-only transcription models need one VAD window per request so the
+    # whole response can inherit that window's original timeline.
+    return [pack_windows([window], max_audio=30.0, separator=0.0)[0] for window in windows]
+
+
 def run_remote_asr(
     media: Path,
     events: list[dict[str, Any]],
@@ -59,7 +67,8 @@ def run_remote_asr(
 ):
     provider = OpenAICompatibleProvider(settings.base_url, settings.api_key, timeout=900)
     windows = select_windows(events, speech_threshold, nonlexical_factor)
-    packs = pack_windows(windows, max_audio=24.0, separator=0.8)
+    timestamped = supports_segment_timestamps(settings.model)
+    packs = _remote_packs(windows, timestamped)
     audio = whisper.load_audio(str(media))
     rows = []
     temp_wav = workdir / "remote_asr_chunk.wav"
@@ -75,11 +84,26 @@ def run_remote_asr(
         _write_wav(temp_wav, clip)
         result = provider.transcribe(settings.model, temp_wav, language)
         segments = result.get("segments")
-        if not isinstance(segments, list):
+        if not timestamped:
+            text = str(result.get("text", "")).strip()
+            mapping = pack["mappings"][0]
+            if text and not any(x in text for x in HALLUCINATIONS.get(language, ())):
+                rows.extend(
+                    _split_segment(
+                        {
+                            "start": round(mapping["original_start"], 3),
+                            "end": round(mapping["original_end"], 3),
+                            "source": text,
+                            "mean_word_probability": 0.9,
+                            "asr_source": "openai_compatible_window_timing",
+                        }
+                    )
+                )
+        elif not isinstance(segments, list):
             raise RuntimeError(
                 "该 OpenAI 兼容转写服务没有返回 verbose_json.segments，无法恢复原视频时间轴"
             )
-        for segment in segments:
+        for segment in segments or []:
             text = str(segment.get("text", "")).strip()
             midpoint = (float(segment.get("start", 0)) + float(segment.get("end", 0))) / 2
             mapping = _mapping(midpoint, pack["mappings"])

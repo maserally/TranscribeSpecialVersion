@@ -30,6 +30,10 @@ def normalize_openai_base_url(base_url: str) -> str:
     return base
 
 
+def supports_segment_timestamps(model: str) -> bool:
+    return not (model.startswith("gpt-4o") and "transcribe" in model)
+
+
 def _raise_provider_error(response: httpx.Response):
     try:
         response.raise_for_status()
@@ -74,17 +78,15 @@ class OpenAICompatibleProvider:
         return _json_from_text(str(content))
 
     def transcribe(self, model: str, wav_path: Path, language: str = "ja") -> dict[str, Any]:
-        if model.startswith("gpt-4o") and "transcribe" in model:
-            raise ValueError(
-                "gpt-4o-transcribe 官方接口只返回 json，不支持本软件恢复时间轴所需的 "
-                "verbose_json.segments；请改用 whisper-1 或其他明确支持分段时间戳的兼容模型"
-            )
         data = {
             "model": model,
             "language": language,
-            "response_format": "verbose_json",
-            "timestamp_granularities[]": "segment",
         }
+        if supports_segment_timestamps(model):
+            data["response_format"] = "verbose_json"
+            data["timestamp_granularities[]"] = "segment"
+        else:
+            data["response_format"] = "json"
         with wav_path.open("rb") as file:
             response = self.client.post(
                 f"{self.base_url}/audio/transcriptions",

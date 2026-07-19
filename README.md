@@ -20,7 +20,7 @@
 - OpenAI 兼容识别：调用 `/v1/audio/transcriptions`；服务必须返回带片段时间戳的 `verbose_json.segments`，否则无法还原视频时间轴。
 - OpenAI 兼容翻译：调用 `/v1/chat/completions`，并通过 `/v1/models` 获取可选模型。
 - Base URL、API Key 和模型可以保存到 `studio_data/settings/provider_settings.json`，API Key 在 Windows 上用当前用户的 DPAPI 加密；任务状态文件仍会清空密钥，整个 `studio_data/` 不进入 Git。
-- 远程 ASR 必须返回 `verbose_json.segments`。官方 `gpt-4o-transcribe` 只支持普通 JSON，无法提供本流程所需的分段时间轴；应使用 `whisper-1` 或其他明确支持分段时间戳的兼容模型。
+- 远程 ASR 若返回 `verbose_json.segments`，软件会使用模型提供的精细时间轴；`gpt-4o-transcribe` 等仅返回普通 JSON 的模型会改为逐个 VAD 窗口请求，并使用窗口级近似时间轴。
 
 ## 三档质量机制
 

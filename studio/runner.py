@@ -143,6 +143,16 @@ class JobManager:
         return self.jobs.get(job_id)
 
     def list(self):
+        with self.lock:
+            stale = [
+                job_id
+                for job_id, job in self.jobs.items()
+                if job.status not in {"queued", "running", "paused"}
+                and not (JOBS_DIR / job_id).exists()
+            ]
+            for job_id in stale:
+                self.jobs.pop(job_id, None)
+                self.controls.pop(job_id, None)
         return sorted((x.public() for x in self.jobs.values()), key=lambda x: x["created_at"], reverse=True)
 
     def archive(self, job_id: str):

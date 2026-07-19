@@ -18,7 +18,11 @@ function fillSavedModel(id,models,installed,value,allowCustom=true){fillModelSel
 
 function providerSettingsBody(){return{asr:{kind:$('#asr-kind').value,base_url:$('#asr-url').value.trim(),api_key:$('#asr-key').value,model:modelValue('#asr-model')},translator:{kind:$('#translator-kind').value,base_url:$('#translator-url').value.trim(),api_key:$('#translator-key').value,model:modelValue('#translator-model')},verifier_model:modelValue('#verifier-model')}}
 async function saveProviderSettings(showStatus=true){const data=await jsonFetch('/api/settings/providers',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(providerSettingsBody())});if(showStatus)$('#provider-save-status').textContent=`已保存到 ${data.path}`;return data}
-$('#save-provider-settings').onclick=async()=>{try{await saveProviderSettings(true)}catch(e){$('#provider-save-status').textContent=`保存失败：${e.message}`}};
+const saveProviderButton=$('#save-provider-settings');if(saveProviderButton)saveProviderButton.onclick=async()=>{try{await saveProviderSettings(true)}catch(e){const status=$('#provider-save-status');if(status)status.textContent=`保存失败：${e.message}`}};
+
+function cleanInputPath(value){let path=String(value||'').trim();const pairs=[['"','"'],["'","'"],['“','”'],['‘','’']];let changed=true;while(changed&&path.length>1){changed=false;for(const [left,right] of pairs){if(path.startsWith(left)&&path.endsWith(right)){path=path.slice(left.length,-right.length).trim();changed=true}}}if(/^file:\/\//i.test(path)){try{path=decodeURIComponent(new URL(path).pathname).replace(/^\/(?:([A-Za-z]:))/,'$1')}catch{}}if(/^[A-Za-z]:\//.test(path))path=path.replaceAll('/','\\');return path}
+function cleanPathField(){const input=$('#input-path'),before=input.value,after=cleanInputPath(before);input.value=after;const status=$('#path-clean-status');if(status)status.textContent=before===after?'路径格式无需修改':'已移除外层引号或多余空格';return after}
+const cleanPathButton=$('#clean-input-path');if(cleanPathButton)cleanPathButton.onclick=cleanPathField;const inputPath=$('#input-path');if(inputPath)inputPath.addEventListener('blur',cleanPathField);
 
 async function init(){
   const health=await jsonFetch('/api/health'); $('#health').textContent=health.ok?`环境正常 · ${health.gpu||'CPU'}`:'缺少 FFmpeg';
@@ -69,7 +73,7 @@ function updateModelHelp(){
   const language=languageMeta[$('#source-language').value]||languageMeta.ja;
   const asr=modelValue('#asr-model'), verifier=modelValue('#verifier-model');
   $('#asr-title').textContent=`3. ${language.name}识别模型`;
-  $('#asr-model-help').textContent=$('#asr-kind').value==='local_whisper'?(whisperHelp[asr]||'本地 Whisper 模型；未缓存时首次使用需要下载'):'远程语音识别模型必须返回 verbose_json.segments；请优先使用 whisper-1，gpt-4o-transcribe 不提供本流程所需的分段时间戳';
+  $('#asr-model-help').textContent=$('#asr-kind').value==='local_whisper'?(whisperHelp[asr]||'本地 Whisper 模型；未缓存时首次使用需要下载'):(asr.startsWith('gpt-4o')&&asr.includes('transcribe')?'gpt-4o-transcribe 使用逐个 VAD 窗口转写，时间轴精度略低于 Whisper 分段时间戳':'远程模型如支持 verbose_json.segments 将使用精细时间轴');
   $('#verifier-model-help').textContent=`${whisperHelp[verifier]||'本地 Whisper 复核模型'}；只复核初筛对白，不会全片重复识别`;
   $('#translator-model-help').textContent=$('#translator-kind').value==='local_ollama'?`本地逐句${language.pair}；请先在 Ollama 中安装所选模型`:`远程逐句${language.pair}；需要支持 Chat Completions 和 JSON 输出`;
 }
@@ -77,7 +81,7 @@ $('#source-language').onchange=updateModelHelp;
 ['#asr-model','#verifier-model','#translator-model'].forEach(id=>$(id).addEventListener('change',()=>{syncCustomModel(id);updateModelHelp()}));['#asr-model-custom','#translator-model-custom'].forEach(id=>$(id).addEventListener('input',updateModelHelp));
 
 async function uploadIfNeeded(){
-  if(sourceMode==='path')return $('#input-path').value.trim(); if(uploadedPath)return uploadedPath;
+  if(sourceMode==='path')return cleanPathField(); if(uploadedPath)return uploadedPath;
   const file=$('#upload-file').files[0]; if(!file)throw new Error('请选择视频'); const form=new FormData();form.append('file',file);
   return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();xhr.open('POST','/api/uploads');xhr.upload.onprogress=e=>{if(e.lengthComputable)$('#upload-progress').style.width=`${e.loaded/e.total*100}%`;};xhr.onload=()=>{if(xhr.status<300){const d=JSON.parse(xhr.responseText);uploadedPath=d.path;$('#upload-status').textContent=`已上传 ${(d.size/1024/1024).toFixed(1)} MB`;resolve(d.path)}else reject(new Error('上传失败'))};xhr.onerror=()=>reject(new Error('上传失败'));xhr.send(form)});
 }

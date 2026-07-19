@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=1.4.1">
 </head>
 <body>
   <main class="shell">
@@ -24,7 +24,7 @@
         <button class="tab" data-mode="upload">上传视频</button>
       </div>
       <div id="path-source" class="source-view active">
-        <label>视频绝对路径<input id="input-path" placeholder="E:\Videos\example.mp4"><small class="field-help">直接读取本机文件，不需要复制或上传；请输入包含扩展名的完整路径</small></label>
+        <label>视频绝对路径<div class="model-row"><input id="input-path" placeholder="E:\Videos\example.mp4"><button id="clean-input-path" type="button">清洗路径</button></div><small id="path-clean-status" class="field-help">支持粘贴带英文／中文引号的路径，提交前会自动清洗</small></label>
       </div>
       <div id="upload-source" class="source-view">
         <label class="drop"><input id="upload-file" type="file" accept="video/*,audio/*">选择视频或音频</label>
@@ -103,6 +103,6 @@
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=1.4.1"></script>
 </body>
 </html>

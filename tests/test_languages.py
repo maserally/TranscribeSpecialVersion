@@ -40,6 +40,11 @@ class LanguageSupportTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             JobOptions(input_path="movie.mp4", source_language="en")
 
+    def test_job_options_clean_quoted_input_paths(self):
+        expected = r"E:\Videos\示例影片\movie.mp4"
+        self.assertEqual(JobOptions(input_path=f'"{expected}"').input_path, expected)
+        self.assertEqual(JobOptions(input_path=f" “{expected}” ").input_path, expected)
+
     def test_korean_sentence_builder_preserves_spaces(self):
         words = [
             {"word": "안녕하세요", "start": 0.1, "end": 0.5, "probability": 0.9},

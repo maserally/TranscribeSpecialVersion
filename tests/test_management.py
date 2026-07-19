@@ -7,7 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from studio.main import app
-from studio.providers import OpenAICompatibleProvider
+from studio.providers import supports_segment_timestamps
+from studio.remote_asr import _remote_packs
 from studio.runner import JobControl, JobManager, JobState
 from studio.schemas import JobOptions
 from studio.settings_store import load_provider_settings, save_provider_settings
@@ -127,10 +128,15 @@ class TaskManagementTests(unittest.TestCase):
                 self.assertEqual(loaded["asr"]["api_key"], "secret-asr-key")
                 self.assertEqual(loaded["translator"]["model"], "translator-model")
 
-    def test_gpt4o_transcribe_is_rejected_with_timeline_guidance(self):
-        provider = OpenAICompatibleProvider("https://example.com/v1")
-        with self.assertRaisesRegex(ValueError, "whisper-1"):
-            provider.transcribe("gpt-4o-transcribe", Path("unused.wav"), "ja")
+    def test_gpt4o_transcribe_uses_one_vad_window_per_request(self):
+        windows = [
+            {"start": 1.0, "end": 3.0, "speech_scores": [0.9], "nonlexical_scores": [0.1]},
+            {"start": 5.0, "end": 7.0, "speech_scores": [0.8], "nonlexical_scores": [0.1]},
+        ]
+        self.assertFalse(supports_segment_timestamps("gpt-4o-transcribe"))
+        packs = _remote_packs(windows, timestamped=False)
+        self.assertEqual(len(packs), 2)
+        self.assertTrue(all(len(pack["mappings"]) == 1 for pack in packs))
 
 
 if __name__ == "__main__":

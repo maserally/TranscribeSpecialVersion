@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 ProviderKind = Literal["local_whisper", "local_ollama", "openai_compatible"]
@@ -35,6 +35,20 @@ class JobOptions(BaseModel):
     create_soft_subtitle_video: bool = True
     create_hard_subtitle_video: bool = False
     enable_gap_recovery: bool = True
+
+    @field_validator("input_path", mode="before")
+    @classmethod
+    def clean_input_path(cls, value):
+        text = str(value or "").strip()
+        quote_pairs = (("\"", "\""), ("'", "'"), ("“", "”"), ("‘", "’"))
+        changed = True
+        while changed and len(text) > 1:
+            changed = False
+            for left, right in quote_pairs:
+                if text.startswith(left) and text.endswith(right):
+                    text = text[len(left) : -len(right)].strip()
+                    changed = True
+        return text
 
 
 class ModelListRequest(BaseModel):
