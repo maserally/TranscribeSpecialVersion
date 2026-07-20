@@ -446,7 +446,15 @@ df -h {models}
         time.sleep(1)
         self.connect()
 
-    def _ensure_verified_audio(self, audio_path: Path) -> dict[str, object]:
+    def _acquire_upload_slot(self):
+        self.logger(f"等待上传通道 · 最多并行 {CLOUD_UPLOAD_CONCURRENCY} 个任务")
+        while not CLOUD_UPLOAD_SLOTS.acquire(timeout=0.25):
+            self.checkpoint()
+        self.logger("已取得上传通道")
+
+    def _ensure_verified_audio(
+        self, audio_path: Path, *, upload_slot_held: bool = False
+    ) -> dict[str, object]:
         if not self.remote_job_dir:
             raise CloudWorkerError("尚未设置云端任务目录")
         remote_audio = posixpath.join(self.remote_job_dir, "audio.flac")
@@ -457,10 +465,8 @@ df -h {models}
         if self._remote_file_info(remote_audio) == expected:
             self.logger(f"复用已校验云端音轨 · {local_size / 1024 / 1024:.1f} MB · SHA-256 {local_sha256[:12]}…")
             return {"size": local_size, "sha256": local_sha256, "reused": True}
-        self.logger(f"等待上传通道 · 最多并行 {CLOUD_UPLOAD_CONCURRENCY} 个任务")
-        while not CLOUD_UPLOAD_SLOTS.acquire(timeout=0.25):
-            self.checkpoint()
-        self.logger("已取得上传通道")
+        if not upload_slot_held:
+            self._acquire_upload_slot()
         try:
             for attempt in range(1, 4):
                 self.checkpoint()
@@ -501,8 +507,9 @@ df -h {models}
             self._exec("rm -f -- " + shlex.quote(remote_part), timeout=30)
             raise CloudWorkerError("音轨连续 3 次未通过文件大小与 SHA-256 校验，已拒绝进入识别阶段")
         finally:
-            CLOUD_UPLOAD_SLOTS.release()
-            self.logger("已释放上传通道")
+            if not upload_slot_held:
+                CLOUD_UPLOAD_SLOTS.release()
+                self.logger("已释放上传通道")
 
     def _download(self, remote_path: str, local_path: Path):
         if not self.sftp:
@@ -517,10 +524,15 @@ df -h {models}
             ) from exc
 
     def stage_job_audio(self, job_id: str, audio_path: Path) -> dict[str, object]:
-        if not self.client:
-            self.connect()
-        self.set_job_dir(job_id)
-        return self._ensure_verified_audio(audio_path)
+        self._acquire_upload_slot()
+        try:
+            if not self.client:
+                self.connect()
+            self.set_job_dir(job_id)
+            return self._ensure_verified_audio(audio_path, upload_slot_held=True)
+        finally:
+            CLOUD_UPLOAD_SLOTS.release()
+            self.logger("已释放上传通道")
 
     def prepare_job(self, job_id: str, audio_path: Path, *, accuracy: bool = False):
         if not self.client:

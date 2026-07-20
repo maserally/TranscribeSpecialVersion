@@ -52,7 +52,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.18.1")
+app = FastAPI(title="字幕翻译工作室", version="1.18.2")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
