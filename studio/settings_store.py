@@ -130,14 +130,24 @@ def load_provider_settings(*, expose_secrets: bool | None = None) -> dict[str, A
 
 
 def save_provider_settings(settings: dict[str, Any]) -> Path:
+    existing: dict[str, Any] = {}
+    if SETTINGS_PATH.exists():
+        try:
+            existing = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
     stored: dict[str, Any] = {"version": 2}
     for name in ("asr", "translator", "text_reviewer"):
         section = settings.get(name, {})
+        incoming_key = str(section.get("api_key", ""))
+        existing_key = str(existing.get(name, {}).get("api_key", ""))
         stored[name] = {
             "kind": str(section.get("kind", "")),
             "base_url": str(section.get("base_url", "")).strip(),
             "model": str(section.get("model", "")).strip(),
-            "api_key": _protect(str(section.get("api_key", ""))),
+            # The browser intentionally leaves an already-saved secret blank.
+            # Blank therefore means "keep", not "erase".
+            "api_key": _protect(incoming_key) if incoming_key else existing_key,
         }
     stored["verifier_model"] = str(settings.get("verifier_model", "")).strip()
     worker = settings.get("cloud_worker", {})
@@ -146,7 +156,11 @@ def save_provider_settings(settings: dict[str, Any]) -> Path:
         "host": str(worker.get("host", "")).strip(),
         "port": int(worker.get("port", 22)),
         "username": str(worker.get("username", "root")).strip(),
-        "password": _protect(str(worker.get("password", ""))),
+        "password": (
+            _protect(str(worker.get("password", "")))
+            if str(worker.get("password", ""))
+            else str(existing.get("cloud_worker", {}).get("password", ""))
+        ),
         "private_key_path": str(worker.get("private_key_path", "")).strip(),
         "remote_dir": str(worker.get("remote_dir", "/root/subtitle-worker")).strip(),
         "auto_setup": bool(worker.get("auto_setup", True)),
@@ -159,10 +173,13 @@ def save_provider_settings(settings: dict[str, Any]) -> Path:
 
 
 def resolve_provider_api_keys(settings):
-    """Fill blank job provider keys from cloud environment variables."""
+    """Fill blank job provider keys from environment or encrypted local settings."""
     resolved = settings.model_copy(deep=True)
+    saved = load_provider_settings(expose_secrets=True)
     for name, env_name in PROVIDER_KEY_ENV.items():
         provider = getattr(resolved, name)
         if not provider.api_key:
-            provider.api_key = os.getenv(env_name, "")
+            provider.api_key = os.getenv(env_name, "") or str(
+                saved.get(name, {}).get("api_key", "")
+            )
     return resolved

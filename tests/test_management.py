@@ -293,6 +293,53 @@ class TaskManagementTests(unittest.TestCase):
                 self.assertEqual(loaded["translator"]["model"], "translator-model")
                 self.assertEqual(loaded["text_reviewer"]["api_key"], "secret-review-key")
 
+    def test_blank_secret_fields_preserve_encrypted_local_keys(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "provider_settings.json"
+            with patch("studio.settings_store.SETTINGS_PATH", path):
+                first = {
+                    "translator": {
+                        "kind": "openai_compatible",
+                        "base_url": "https://example.com/v1",
+                        "api_key": "keep-this-key",
+                        "model": "old-model",
+                    },
+                    "cloud_worker": {"password": "keep-this-password"},
+                }
+                save_provider_settings(first)
+                save_provider_settings(
+                    {
+                        "translator": {
+                            "kind": "openai_compatible",
+                            "base_url": "https://example.com/v1",
+                            "api_key": "",
+                            "model": "new-model",
+                        },
+                        "cloud_worker": {"password": ""},
+                    }
+                )
+                loaded = load_provider_settings(expose_secrets=True)
+                self.assertEqual(loaded["translator"]["api_key"], "keep-this-key")
+                self.assertEqual(loaded["translator"]["model"], "new-model")
+                self.assertEqual(
+                    loaded["cloud_worker"]["password"], "keep-this-password"
+                )
+
+    def test_resolve_provider_keys_falls_back_to_encrypted_local_settings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "provider_settings.json"
+            with patch("studio.settings_store.SETTINGS_PATH", path), patch.dict(
+                "os.environ", {"SUBTITLE_TRANSLATOR_API_KEY": ""}, clear=False
+            ):
+                save_provider_settings(
+                    {"translator": {"api_key": "saved-translator-key"}}
+                )
+                options = JobOptions(input_path="movie.mp4")
+                resolved = resolve_provider_api_keys(options)
+                self.assertEqual(
+                    resolved.translator.api_key, "saved-translator-key"
+                )
+
     def test_cloud_settings_never_persist_keys_and_resolve_environment(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "provider_settings.json"
