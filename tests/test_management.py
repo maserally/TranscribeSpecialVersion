@@ -10,6 +10,7 @@ from studio.main import _bulk_job_action, app
 from studio.providers import supports_segment_timestamps
 from studio.remote_asr import _remote_packs
 from studio.runner import JobControl, JobManager, JobState
+from studio.providers import _json_from_text
 from studio.schemas import CloudWorkerSettings, JobOptions, ProviderSettings
 from studio.settings_store import (
     load_provider_settings,
@@ -19,6 +20,16 @@ from studio.settings_store import (
 
 
 class TaskManagementTests(unittest.TestCase):
+    def test_provider_json_parser_accepts_extra_text_and_multiple_objects(self):
+        self.assertEqual(
+            _json_from_text('说明：```json\n{"zh":"第一句"}\n``` 完成'),
+            {"zh": "第一句"},
+        )
+        self.assertEqual(
+            _json_from_text('{"zh":"第一句"}{"zh":"多余内容"}'),
+            {"zh": "第一句"},
+        )
+
     def test_staged_job_can_be_started_with_fresh_cloud_credentials(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

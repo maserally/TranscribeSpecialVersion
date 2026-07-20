@@ -12,10 +12,34 @@ WHISPER_MODEL_CHOICES = [
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
+    """Read the first JSON object from common OpenAI-compatible responses."""
     text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.S)
-    return json.loads(text)
+    candidates = [text]
+    candidates.extend(
+        match.group(1).strip()
+        for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.I)
+    )
+    decoder = json.JSONDecoder()
+    errors: list[Exception] = []
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+            if isinstance(value, dict):
+                return value
+        except (json.JSONDecodeError, TypeError) as exc:
+            errors.append(exc)
+        for index, character in enumerate(candidate):
+            if character != "{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(candidate, index)
+            except json.JSONDecodeError as exc:
+                errors.append(exc)
+                continue
+            if isinstance(value, dict):
+                return value
+    detail = str(errors[-1]) if errors else "响应中没有 JSON 对象"
+    raise ValueError(f"模型返回内容无法解析为 JSON 对象：{detail}")
 
 
 def normalize_openai_base_url(base_url: str) -> str:
