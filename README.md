@@ -64,7 +64,7 @@ python -m uvicorn studio.main:app --host 127.0.0.1 --port 8765
 ## 流程
 
 1. `vad_scan.py`：使用 WebRTC VAD 找出人声活动候选；严格模式仍会包含喘息。
-2. `audio_event_gate.py`：使用 AudioSet AST 模型区分 Speech 与 Breathing、Pant、Wheeze、Gasp、Moan、Water 等声音事件。
+2. `audio_event_gate.py`：已有缓存时使用 AudioSet AST 模型区分 Speech 与 Breathing、Pant、Wheeze、Gasp、Moan、Water 等声音事件；云端没有缓存时不会在付费任务中等待外网下载，而是立即采用高召回 VAD 兜底，把候选语音交给 Whisper 继续过滤，避免整批任务因模型源断网失败。
 3. `asr_stage.py`：将候选片段压缩打包，使用 Whisper medium 识别并生成词级时间戳；过滤静音幻听、重复、低置信度和高压缩异常。
 4. `large_review.py`：只对 medium 保留的对白使用 Whisper large-v3 复核，避免全片运行 large-v3 的巨大开销。
 5. `studio/recall.py`：扫描较长无字幕区间；均衡／召回模式还会复查声音事件门控漏掉、但 VAD 确认有活动的片段，所有补回结果仍必须通过双模型一致性。

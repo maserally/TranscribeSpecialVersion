@@ -12,6 +12,24 @@ SPEECH_IDS = [0, 1, 2, 3, 4, 15]
 NONLEXICAL_IDS = [14, 22, 24, 25, 26, 38, 39, 41, 42, 44, 45, 46]
 
 
+def vad_speech_fallback(units, reason="AudioSet AST unavailable"):
+    print(
+        f"WARNING: {reason}; using recall-safe VAD speech fallback for {len(units)} units",
+        flush=True,
+    )
+    return [
+        {
+            **unit,
+            "speech_score": 1.0,
+            "nonlexical_score": 0.0,
+            "speech_margin": 1.0,
+            "top_labels": [{"label": "VAD speech fallback", "score": 1.0}],
+            "event_gate_fallback": True,
+        }
+        for unit in units
+    ]
+
+
 def split_vad(vad_segments, max_duration=8.0):
     units = []
     for seg in vad_segments:
@@ -34,8 +52,16 @@ def classify(media, units, batch_size=12):
     print("Loading audio...", flush=True)
     audio = whisper.load_audio(media)
     print("Loading AudioSet AST model...", flush=True)
-    extractor = ASTFeatureExtractor()
-    model = ASTForAudioClassification.from_pretrained(MODEL_NAME).to(device).eval()
+    try:
+        extractor = ASTFeatureExtractor()
+        model = ASTForAudioClassification.from_pretrained(
+            MODEL_NAME, local_files_only=True
+        ).to(device).eval()
+    except Exception as exc:
+        return vad_speech_fallback(
+            units,
+            f"AudioSet AST load failed ({type(exc).__name__}: {str(exc)[:240]})",
+        )
     id2label = model.config.id2label
     rows = []
 

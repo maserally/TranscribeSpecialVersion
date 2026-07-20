@@ -209,6 +209,7 @@ class CloudWhisperWorker:
             self.connect()
         remote = shlex.quote(self.settings.remote_dir)
         script = f"""set -e
+export OMP_NUM_THREADS=4
 if ! command -v python3 >/dev/null 2>&1; then
   if [ "$(id -u)" = 0 ]; then apt-get update && apt-get install -y python3 python3-venv; else sudo -n apt-get update && sudo -n apt-get install -y python3 python3-venv; fi
 fi
@@ -421,6 +422,7 @@ touch {remote}/.worker-ready-v2
         self._upload(vad_path, remote_vad, "上传 VAD 分段")
         python = posixpath.join(self.settings.remote_dir, ".venv", "bin", "python")
         args = [
+            "env", "OMP_NUM_THREADS=4",
             python,
             posixpath.join(self.remote_job_dir, "audio_event_gate.py"),
             posixpath.join(self.remote_job_dir, "audio.flac"),
@@ -447,6 +449,7 @@ touch {remote}/.worker-ready-v2
         self._upload(events_path, remote_events, "上传识别分段")
         python = posixpath.join(self.settings.remote_dir, ".venv", "bin", "python")
         args = [
+            "env", "OMP_NUM_THREADS=4",
             python,
             posixpath.join(self.remote_job_dir, "asr_stage.py"),
             posixpath.join(self.remote_job_dir, "audio.flac"),
@@ -478,6 +481,7 @@ touch {remote}/.worker-ready-v2
         self._upload(source_path, remote_source, "上传复核文本")
         python = posixpath.join(self.settings.remote_dir, ".venv", "bin", "python")
         args = [
+            "env", "OMP_NUM_THREADS=4",
             python,
             posixpath.join(self.remote_job_dir, "large_review.py"),
             posixpath.join(self.remote_job_dir, "audio.flac"),
