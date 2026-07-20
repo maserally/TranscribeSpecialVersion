@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.16.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.17.0">
 </head>
 <body>
   <main class="shell">
@@ -71,12 +71,22 @@
       </div>
     </section>
 
-    <section class="provider-grid">
-      <div class="panel provider" id="asr-panel">
-        <h2 id="asr-title">3. 日语识别模型</h2>
+    <section class="panel compute-mode-panel">
+      <h2>3. 选择识别算力</h2>
+      <div class="compute-mode-grid">
+        <label class="compute-choice selected" data-compute-choice="local"><input type="radio" name="compute-mode" value="local" checked><b>本机识别</b><span>使用本机 Whisper 或兼容 ASR 接口；不会连接云 GPU</span></label>
+        <label class="compute-choice cloud-choice" data-compute-choice="cloud"><input type="radio" name="compute-mode" value="cloud"><b>云算力最高精度</b><span>固定使用 Qwen＋Cohere＋large-v3＋ForcedAligner 判决架构</span></label>
+      </div>
+      <div id="compute-mode-banner" class="compute-mode-banner local">当前使用本机识别：下方“本机专用配置”可编辑，云算力区域已停用。</div>
+      <input id="cloud-worker-enabled" type="checkbox" class="hidden" aria-hidden="true">
+    </section>
+
+    <section class="mode-config-grid">
+      <div class="panel provider mode-zone local-zone" id="asr-panel">
+        <div class="zone-heading"><div><span class="zone-tag local">本机专用</span><h2 id="asr-title">4. 日语本机识别模型</h2></div><span class="zone-state" id="local-zone-state">正在使用</span></div>
         <label>提供方
-          <select id="asr-kind"><option value="local_whisper">本地 Whisper</option><option value="accuracy_ensemble">云端最高精度多模型</option><option value="openai_compatible">OpenAI 兼容接口</option></select>
-          <small class="field-help">本地 Whisper 不发送音频到网络；兼容接口适合使用云端或局域网 ASR 服务</small>
+          <select id="asr-kind"><option value="local_whisper">本地 Whisper</option><option value="openai_compatible">OpenAI 兼容接口</option></select>
+          <small class="field-help">选择云算力时，这一整块配置会保留但不会参与任务</small>
         </label>
         <div class="remote-fields hidden" data-for="asr">
           <label>Base URL<input id="asr-url" value="https://api.openai.com/v1"><small class="field-help">可填域名、/v1 或完整的 /v1/audio/transcriptions 地址，软件会自动规范化</small></label>
@@ -87,8 +97,39 @@
         <label>本地复核模型<select id="verifier-model"></select><small id="verifier-model-help" class="field-help">只复核初筛后的对白；large-v3 更准确但更占显存，不会全片重复识别</small></label>
       </div>
 
+      <div id="cloud-worker-panel" class="panel mode-zone cloud-zone inactive-zone">
+        <div class="zone-heading"><div><span class="zone-tag cloud">云算力专用</span><h2>4. 云端识别与服务器</h2></div><span class="zone-state" id="cloud-zone-state">当前停用</span></div>
+        <p class="muted">视频保留在本机，仅上传经过 SHA-256 校验的双声道 FLAC。识别模型只安装并运行在云端数据盘。</p>
+        <div class="cloud-architecture">
+          <div class="architecture-title"><b>默认复杂场景判决架构</b><span>固定启用 · 准确性优先</span></div>
+          <div class="architecture-flow">
+            <div><strong>① Qwen3-ASR-1.7B</strong><small>原始音频 · 全片主识别</small></div>
+            <div><strong>② Cohere Transcribe</strong><small>保守增强音频 · 并行独立复核</small></div>
+            <div><strong>③ large-v3</strong><small>仅裁决弱声、噪声和文本冲突</small></div>
+            <div><strong>④ Qwen ForcedAligner</strong><small>最终恢复精确时间轴</small></div>
+          </div>
+          <small class="field-help">真立体声冲突会额外比较中置、左、右声道；模型架构由程序自动判决，无需手动选择。</small>
+        </div>
+        <div id="cloud-worker-fields" class="cloud-worker-grid disabled-panel">
+          <label>服务器地址<input id="cloud-worker-host" placeholder="例如 AutoDL 实例 SSH 地址"></label>
+          <label>SSH 端口<input id="cloud-worker-port" type="number" min="1" max="65535" value="22"></label>
+          <label>用户名<input id="cloud-worker-username" value="root"></label>
+          <label>SSH 密码<input id="cloud-worker-password" type="password" autocomplete="off"><small class="field-help">使用 Windows DPAPI 加密保存在本机，不进入任务记录或 Git</small></label>
+          <label>私钥路径（与密码二选一）<input id="cloud-worker-key" placeholder="C:\Users\你\.ssh\id_ed25519"></label>
+          <label>云端工作目录<input id="cloud-worker-dir" value="/root/subtitle-worker"></label>
+          <label>云端模型数据盘目录<input id="cloud-worker-model-dir" value="/root/autodl-tmp/subtitle-models"><small class="field-help">全部识别模型只保存在数据盘；安装前要求至少 35GB 可用空间</small></label>
+        </div>
+        <label><input id="cloud-worker-auto-setup" type="checkbox" checked>首次连接自动安装全部依赖并从国内源下载模型</label>
+        <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">安装基础环境</button><button id="bootstrap-accuracy-worker" type="button">安装并校验全部模型</button><button id="stage-cloud" type="button">无卡模式：预上传所选音轨</button></div>
+        <div id="cloud-worker-status" class="model-status">选择“云算力最高精度”后可连接服务器</div>
+      </div>
+    </section>
+
+    <section class="common-config-section">
+      <div class="common-heading"><span class="zone-tag common">云／本地通用</span><div><h2>5. 翻译与最终校正</h2><p class="muted">无论语音识别在本机还是云端运行，识别完成后都会使用下面两项配置。</p></div></div>
+      <div class="provider-grid common-provider-grid">
       <div class="panel provider" id="translator-panel">
-        <h2>4. 中文翻译模型</h2>
+        <h2>中文翻译模型</h2>
         <label>提供方
           <select id="translator-kind"><option value="local_ollama">本地 Ollama</option><option value="openai_compatible">OpenAI 兼容接口</option></select>
           <small class="field-help">Ollama 在本机翻译；兼容接口调用支持 Chat Completions 的服务</small>
@@ -101,7 +142,7 @@
       </div>
 
       <div class="panel provider" id="text-reviewer-panel">
-        <h2>5. 自动质量校正模型</h2>
+        <h2>自动质量校正模型</h2>
         <label>提供方
           <select id="text-reviewer-kind"><option value="local_ollama">本地 Ollama</option><option value="openai_compatible">OpenAI 兼容接口</option></select>
           <small class="field-help">每个任务都会自动校正识别文本、译文、语境和全片术语一致性，可使用本地或云端模型</small>
@@ -112,28 +153,16 @@
         </div>
         <label>校正模型<div class="model-row"><select id="text-reviewer-model"></select><button type="button" id="refresh-text-reviewer">刷新模型</button></div><input id="text-reviewer-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="text-reviewer-model-help" class="field-help">按批次读取前后文，只修改文字，不修改字幕 ID、条数和时间轴</small></label>
       </div>
-    </section>
-
-    <section id="cloud-worker-panel" class="panel">
-      <div class="section-title"><div><h2>6. 云 GPU 运算单元</h2><p class="muted">可选：视频留在本机，仅上传自动提取的 FLAC 音轨；云端完成 Whisper 运算后，本机继续翻译、校正和生成产物。</p></div><label class="switch-label"><input id="cloud-worker-enabled" type="checkbox">使用云 GPU</label></div>
-      <div id="cloud-worker-fields" class="cloud-worker-grid disabled-panel">
-        <label>服务器地址<input id="cloud-worker-host" placeholder="例如 AutoDL 实例 SSH 地址"></label>
-        <label>SSH 端口<input id="cloud-worker-port" type="number" min="1" max="65535" value="22"></label>
-        <label>用户名<input id="cloud-worker-username" value="root"></label>
-        <label>SSH 密码<input id="cloud-worker-password" type="password" autocomplete="off"><small class="field-help">使用 Windows DPAPI 加密保存在本机，不进入任务记录或 Git</small></label>
-        <label>私钥路径（与密码二选一）<input id="cloud-worker-key" placeholder="C:\Users\你\.ssh\id_ed25519"></label>
-        <label>云端工作目录<input id="cloud-worker-dir" value="/root/subtitle-worker"></label>
-        <label>云端模型数据盘目录<input id="cloud-worker-model-dir" value="/root/autodl-tmp/subtitle-models"><small class="field-help">Qwen、Cohere 和对齐模型只保存在数据盘；安装前要求至少 35GB 可用空间</small></label>
       </div>
-      <label><input id="cloud-worker-auto-setup" type="checkbox" checked>首次连接自动安装全部云端依赖并下载最高精度模型（国内源优先）</label>
-      <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">连接并安装运算环境</button><button id="bootstrap-accuracy-worker" type="button">安装最高精度模型</button><button id="stage-cloud" type="button">无卡模式：预上传所选音轨</button><span id="cloud-worker-status" class="muted"></span></div>
-      <small class="field-help">正式 GPU 处理会在云端自动安装 Qwen3-ASR、Cohere、large-v3 与 ForcedAligner；本机不安装这些模型。预上传只校验音轨，不需要 GPU。</small>
     </section>
 
-    <section class="panel provider-storage">
-      <div><h2 id="provider-storage-title">7. 本地接口配置</h2><p id="provider-storage-help" class="muted">模型、云节点和接口配置保存到 studio_data/settings/provider_settings.json；密码与 API Key 使用当前 Windows 用户的 DPAPI 加密，文件不会提交到 Git。</p></div>
-      <button id="save-provider-settings">保存接口配置</button>
-      <span id="provider-save-status" class="muted"></span>
+    <section class="panel settings-storage">
+      <div class="storage-heading"><h2 id="provider-storage-title">6. 分区保存配置</h2><p id="provider-storage-help" class="muted">三类配置独立显示和保存；均写入本机配置目录，密码与 API Key 使用 Windows DPAPI 加密。</p></div>
+      <div class="storage-grid">
+        <div><b>本机专用配置</b><small>本机 ASR、识别模型和复核模型</small><button id="save-local-settings" type="button">保存本机配置</button><span id="local-save-status"></span></div>
+        <div><b>云算力专用配置</b><small>运行方式、SSH、云端目录和自动安装</small><button id="save-cloud-settings" type="button">保存云算力配置</button><span id="cloud-save-status"></span></div>
+        <div><b>云／本地通用配置</b><small>翻译模型、API 与最终文本校正模型</small><button id="save-common-settings" type="button">保存通用配置</button><span id="common-save-status"></span></div>
+      </div>
     </section>
 
     <section class="panel launch">
@@ -148,6 +177,6 @@
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.16.0"></script>
+  <script src="/static/app.js?v=1.17.0"></script>
 </body>
 </html>
