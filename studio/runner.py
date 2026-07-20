@@ -400,10 +400,18 @@ class JobManager:
         job = self.get(job_id)
         if not job:
             raise KeyError(job_id)
-        if job.status not in {"queued", "running", "paused"}:
-            raise RuntimeError("任务已经结束")
+        if job.status not in {"queued", "running", "paused", "staged", "failed"}:
+            raise RuntimeError("该任务当前无需取消")
         with self.lock:
             control = self.controls.get(job_id)
+        if job.status in {"staged", "failed"}:
+            self.update(
+                job,
+                status="canceled",
+                stage="任务已取消 · 仅保留日志",
+                log="任务已取消，正在清理任务文件并仅保留日志",
+            )
+            return job
         if not control:
             # Persisted paused jobs have no live process after an application
             # restart. They are already stopped and can be canceled directly.
@@ -411,8 +419,8 @@ class JobManager:
                 self.update(
                     job,
                     status="canceled",
-                    stage="任务已取消",
-                    log="已取消重启前暂停的任务；当前没有活动进程",
+                    stage="任务已取消 · 仅保留日志",
+                    log="已取消重启前暂停的任务；正在清理任务文件并仅保留日志",
                 )
                 return job
             raise RuntimeError("该任务当前没有可控制的运行进程")
@@ -436,7 +444,68 @@ class JobManager:
                     process.kill()
                 except psutil.Error:
                     pass
-        self.update(job, status="canceled", stage="任务已取消", log="任务已取消，可安全删除")
+        self.update(
+            job,
+            status="canceled",
+            stage="任务已取消 · 仅保留日志",
+            log="任务已取消，正在清理任务文件并仅保留日志",
+        )
+        return job
+
+    def wait_until_stopped(self, job_id: str, timeout: float = 20) -> bool:
+        with self.lock:
+            control = self.controls.get(job_id)
+        if not control or control.finished_event.is_set():
+            return True
+        return control.finished_event.wait(timeout)
+
+    def _remove_known_outputs(self, job: JobState):
+        input_path = Path(job.options.input_path).resolve()
+        for raw_path in set(job.outputs.values()):
+            try:
+                path = Path(raw_path).resolve()
+                if path != input_path and path.is_file():
+                    path.unlink()
+            except OSError:
+                pass
+        job.outputs.clear()
+
+    def _remove_owned_upload(self, job_id: str, input_path: Path):
+        other_inputs = {
+            Path(other.options.input_path).resolve()
+            for other_id, other in self.jobs.items()
+            if other_id != job_id
+        }
+        uploads_root = UPLOADS_DIR.resolve()
+        if input_path.is_relative_to(uploads_root) and input_path not in other_inputs:
+            relative = input_path.relative_to(uploads_root)
+            upload_dir = uploads_root / relative.parts[0]
+            if upload_dir.parent == uploads_root and upload_dir.exists():
+                shutil.rmtree(upload_dir)
+
+    def prune_canceled_to_logs(self, job_id: str):
+        job = self.get(job_id)
+        if not job:
+            raise KeyError(job_id)
+        if job.status != "canceled":
+            raise RuntimeError("只有已取消任务可以清理为仅保留日志")
+        if not self.wait_until_stopped(job_id):
+            raise RuntimeError("任务进程尚未完全停止，请稍后重试取消")
+        input_path = Path(job.options.input_path).resolve()
+        target = (JOBS_DIR / job_id).resolve()
+        if target.parent != JOBS_DIR.resolve():
+            raise RuntimeError("任务目录不安全，拒绝清理")
+        self._remove_known_outputs(job)
+        if target.exists():
+            for child in target.iterdir():
+                if child.name == "status.json":
+                    continue
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink(missing_ok=True)
+        self._remove_owned_upload(job_id, input_path)
+        self.update(job, stage="任务已取消 · 仅保留日志", log="本地与云端任务文件已清理，仅保留日志记录")
         return job
 
     def delete(self, job_id: str):
@@ -450,11 +519,7 @@ class JobManager:
             if control and not control.finished_event.is_set():
                 raise RuntimeError("任务正在停止并清理资源，请稍候再删除")
             input_path = Path(job.options.input_path).resolve()
-            other_inputs = {
-                Path(other.options.input_path).resolve()
-                for other_id, other in self.jobs.items()
-                if other_id != job_id
-            }
+            self._remove_known_outputs(job)
             self.jobs.pop(job_id)
             self.controls.pop(job_id, None)
         target = (JOBS_DIR / job_id).resolve()
@@ -462,12 +527,7 @@ class JobManager:
             raise RuntimeError("任务目录不安全，拒绝删除")
         if target.exists():
             shutil.rmtree(target)
-        uploads_root = UPLOADS_DIR.resolve()
-        if input_path.is_relative_to(uploads_root) and input_path not in other_inputs:
-            relative = input_path.relative_to(uploads_root)
-            upload_dir = uploads_root / relative.parts[0]
-            if upload_dir.parent == uploads_root and upload_dir.exists():
-                shutil.rmtree(upload_dir)
+        self._remove_owned_upload(job_id, input_path)
         return target
 
     def checkpoint(self, job: JobState):

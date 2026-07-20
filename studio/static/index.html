@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.18.3">
+  <link rel="stylesheet" href="/static/style.css?v=1.19.0">
 </head>
 <body>
   <main class="shell">
@@ -122,7 +122,7 @@
           <label>预上传与任务数据盘目录<input id="cloud-worker-data-dir" value="/root/autodl-tmp/subtitle-jobs"><small class="field-help">预上传 FLAC、分段和识别中间文件全部存放在这里，不占系统盘</small></label>
         </div>
         <label><input id="cloud-worker-auto-setup" type="checkbox" checked>首次连接自动安装全部依赖并从国内源下载模型</label>
-        <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">安装基础环境</button><button id="bootstrap-accuracy-worker" type="button">安装并校验全部模型</button><button id="stage-cloud" type="button">无卡模式：预上传所选音轨</button></div>
+        <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">安装基础环境</button><button id="bootstrap-accuracy-worker" type="button">安装并校验全部模型</button></div>
         <div id="cloud-worker-status" class="model-status">选择“云算力最高精度”后可连接服务器</div>
         <div class="inline-config-save"><div><b>云算力配置</b><small>保存运行模式、SSH、程序目录与数据盘目录</small></div><button id="save-cloud-settings" type="button">保存云算力配置</button><span id="cloud-save-status"></span></div>
       </div>
@@ -168,10 +168,20 @@
     </section>
 
     <section class="panel jobs">
-      <div class="section-title"><h2>任务</h2><div class="job-bulk-actions"><button id="refresh-jobs">刷新</button><button id="retry-failed-staged-jobs">重试失败预上传</button><button id="start-all-staged-jobs">开始全部已预上传</button><button id="pause-all-jobs">全部暂停</button><button id="resume-all-jobs">应用当前产物设置并全部继续</button><button id="cancel-all-jobs" class="danger">全部取消</button><button id="delete-all-jobs" class="danger">全部删除</button></div></div>
+      <div class="task-heading"><div><h2>任务中心</h2><p class="muted">预上传、运行控制、失败重试和清理都在这里完成</p></div><button id="refresh-jobs">刷新状态</button></div>
+      <div class="overall-task-progress">
+        <div class="overall-progress-title"><b>总任务进度</b><strong id="overall-progress-percent">0%</strong></div>
+        <div class="progress overall-progress"><i id="overall-progress-bar"></i></div>
+        <div id="overall-progress-summary" class="muted">尚无任务</div>
+      </div>
+      <div class="task-toolbar">
+        <div class="task-action-group"><span>创建与开始</span><button id="stage-cloud" type="button">预上传当前所选文件</button><button id="start-all-staged-jobs">开始已预上传任务</button></div>
+        <div class="task-action-group"><span>运行控制</span><button id="pause-all-jobs">暂停全部运行任务</button><button id="resume-all-jobs">继续全部暂停任务</button><button id="retry-all-failed-jobs">重试全部失败任务</button></div>
+        <div class="task-action-group cleanup"><span>清理</span><button id="cancel-all-jobs" class="danger">取消活动任务（仅留日志）</button><button id="delete-all-jobs" class="danger">彻底删除全部任务</button></div>
+      </div>
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.18.3"></script>
+  <script src="/static/app.js?v=1.19.0"></script>
 </body>
 </html>

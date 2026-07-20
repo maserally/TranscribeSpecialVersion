@@ -157,7 +157,46 @@ class TaskManagementTests(unittest.TestCase):
 
                 self.assertEqual(canceled.status, "canceled")
                 self.assertNotIn(job.id, manager.controls)
-                self.assertIn("没有活动进程", canceled.logs[-1])
+                self.assertIn("仅保留日志", canceled.logs[-1])
+
+    def test_cancel_prunes_task_files_but_keeps_log_record_and_source_video(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            jobs = root / "jobs"
+            uploads = root / "uploads"
+            source = root / "source.mp4"
+            output = root / "movie_zh.srt"
+            source.write_bytes(b"source-video")
+            output.write_text("subtitle", encoding="utf-8")
+            with patch("studio.runner.JOBS_DIR", jobs), patch(
+                "studio.runner.UPLOADS_DIR", uploads
+            ):
+                manager = JobManager()
+                job = JobState(
+                    id="cancel-keep-log",
+                    options=JobOptions(input_path=str(source), cloud_stage_only=True),
+                    status="staged",
+                    outputs={"srt": str(output)},
+                )
+                manager.jobs[job.id] = job
+                work = jobs / job.id / "work"
+                work.mkdir(parents=True)
+                (work / "cloud_audio.flac").write_bytes(b"audio")
+                manager.persist(job)
+
+                manager.cancel(job.id)
+                manager.prune_canceled_to_logs(job.id)
+
+                self.assertTrue(source.exists())
+                self.assertFalse(output.exists())
+                self.assertFalse(work.exists())
+                self.assertEqual(
+                    {path.name for path in (jobs / job.id).iterdir()}, {"status.json"}
+                )
+                restored = JobManager().get(job.id)
+                self.assertEqual(restored.status, "canceled")
+                self.assertEqual(restored.outputs, {})
+                self.assertTrue(restored.logs)
 
     def test_pause_resume_cancel_and_safe_delete(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -271,8 +310,10 @@ class TaskManagementTests(unittest.TestCase):
         self.assertIn("/api/jobs/actions/resume-all", paths)
         self.assertIn("/api/jobs/actions/cancel-all", paths)
         self.assertIn("/api/jobs/actions/delete-finished", paths)
+        self.assertIn("/api/jobs/actions/delete-all", paths)
         self.assertIn("/api/jobs/actions/start-staged-all", paths)
         self.assertIn("/api/jobs/actions/retry-stage-failed", paths)
+        self.assertIn("/api/jobs/actions/retry-failed-all", paths)
         self.assertIn("/api/jobs/{job_id}/start-staged", paths)
         self.assertIn("/api/jobs/{job_id}/retry-stage", paths)
 
@@ -299,7 +340,10 @@ class TaskManagementTests(unittest.TestCase):
                 return None
 
         fake = FakeManager()
-        with patch("studio.main.manager", fake):
+        with patch("studio.main.manager", fake), patch(
+            "studio.main._delete_job_completely",
+            side_effect=lambda job_id: (fake.delete(job_id), ""),
+        ):
             paused = _bulk_job_action("pause", {"queued", "running"})
             deleted = _bulk_job_action("delete", {"completed", "failed", "canceled"})
 
@@ -307,6 +351,29 @@ class TaskManagementTests(unittest.TestCase):
         self.assertEqual(set(fake.paused), {"running", "queued"})
         self.assertEqual(deleted["count"], 1)
         self.assertEqual(fake.deleted, ["done"])
+
+    def test_task_panel_exposes_total_progress_and_explicit_bulk_actions(self):
+        html = (Path(__file__).parents[1] / "studio" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        script = (Path(__file__).parents[1] / "studio" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('id="overall-progress-bar"', html)
+        self.assertIn('id="stage-cloud"', html)
+        self.assertIn('id="retry-all-failed-jobs"', html)
+        self.assertIn('id="delete-all-jobs"', html)
+        self.assertIn("renderOverallProgress(data.jobs)", script)
+        self.assertIn("retry-failed-all", script)
+        self.assertIn("delete-all", script)
+
+    def test_update_maintenance_lock_blocks_all_program_operations(self):
+        source = (Path(__file__).parents[1] / "studio" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('MAINTENANCE_LOCK = DATA_DIR / "maintenance.lock"', source)
+        self.assertIn("if MAINTENANCE_LOCK.exists()", source)
+        self.assertIn("status_code=503", source)
 
     def test_task_status_hides_all_provider_api_keys(self):
         options = JobOptions(

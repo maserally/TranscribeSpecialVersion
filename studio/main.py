@@ -52,13 +52,26 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.18.3")
+app = FastAPI(title="字幕翻译工作室", version="1.19.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".ts", ".m2ts", ".wmv", ".flv",
 }
 MAX_BATCH_FILES = 500
+MAINTENANCE_LOCK = DATA_DIR / "maintenance.lock"
+
+
+@app.middleware("http")
+async def maintenance_lock(request: Request, call_next):
+    if MAINTENANCE_LOCK.exists():
+        return Response(
+            content="字幕工作室正在安全更新，当前所有操作已锁定，请稍后刷新。",
+            status_code=503,
+            media_type="text/plain; charset=utf-8",
+            headers={"Retry-After": "5"},
+        )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -408,8 +421,12 @@ def list_jobs():
     return {"jobs": manager.list()}
 
 
-def _cleanup_preuploaded_audio(job):
-    if not job or not (job.status == "staged" or job.options.cloud_stage_only):
+def _cleanup_cloud_job(job):
+    if not job or not (
+        job.cloud_worker_settings
+        or job.options.cloud_stage_only
+        or job.options.asr.kind == "accuracy_ensemble"
+    ):
         return ""
     saved = load_provider_settings(expose_secrets=True)
     worker_settings = job.cloud_worker_settings or CloudWorkerSettings.model_validate(
@@ -422,11 +439,43 @@ def _cleanup_preuploaded_audio(job):
         worker.cleanup_job()
         return ""
     except Exception as exc:
-        # Local task deletion must remain possible when a disposable GPU node
-        # has been shut down, cloned, or had its SSH credentials changed.
+        # Keep the local record when remote cleanup cannot be confirmed so the
+        # user can retry instead of silently leaving cloud task data behind.
         return f"云端临时目录未确认清理：{exc}"
     finally:
         worker.close()
+
+
+def _cancel_keep_logs(job_id: str):
+    job = manager.get(job_id)
+    if not job:
+        raise KeyError(job_id)
+    if job.status != "canceled":
+        manager.cancel(job_id)
+    if not manager.wait_until_stopped(job_id, timeout=20):
+        raise RuntimeError("任务停止超时，已保留现场，请稍后再次取消")
+    warning = _cleanup_cloud_job(job)
+    if warning:
+        manager.update(job, log=warning)
+        raise RuntimeError(warning)
+    manager.prune_canceled_to_logs(job_id)
+    return job, warning
+
+
+def _delete_job_completely(job_id: str):
+    job = manager.get(job_id)
+    if not job:
+        raise KeyError(job_id)
+    if job.status in {"queued", "running", "paused", "staged"}:
+        manager.cancel(job_id)
+    if not manager.wait_until_stopped(job_id, timeout=20):
+        raise RuntimeError("任务停止超时，未执行彻底删除")
+    warning = _cleanup_cloud_job(job)
+    if warning:
+        manager.update(job, log=warning)
+        raise RuntimeError(warning)
+    deleted = manager.delete(job_id)
+    return deleted, warning
 
 
 def _bulk_job_action(action: str, eligible_statuses: set[str]):
@@ -438,8 +487,11 @@ def _bulk_job_action(action: str, eligible_statuses: set[str]):
     for job_id in targets:
         try:
             if action == "delete":
-                warning = _cleanup_preuploaded_audio(manager.get(job_id))
-                manager.delete(job_id)
+                _, warning = _delete_job_completely(job_id)
+                if warning:
+                    warnings.append({"id": job_id, "warning": warning})
+            elif action == "cancel":
+                _, warning = _cancel_keep_logs(job_id)
                 if warning:
                     warnings.append({"id": job_id, "warning": warning})
             else:
@@ -491,7 +543,7 @@ def resume_all_jobs():
 
 @app.post("/api/jobs/actions/cancel-all")
 def cancel_all_jobs():
-    return _bulk_job_action("cancel", {"queued", "running", "paused"})
+    return _bulk_job_action("cancel", {"queued", "running", "paused", "staged"})
 
 
 @app.post("/api/jobs/actions/start-staged-all")
@@ -546,9 +598,44 @@ def retry_failed_staged_uploads():
     }
 
 
+@app.post("/api/jobs/actions/retry-failed-all")
+def retry_all_failed_jobs():
+    saved = load_provider_settings(expose_secrets=True)
+    worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    targets = [job["id"] for job in manager.list() if job["status"] == "failed"]
+    succeeded = []
+    failed = []
+    for job_id in targets:
+        try:
+            job = manager.get(job_id)
+            job.options = resolve_provider_api_keys(job.options)
+            if job.options.cloud_stage_only:
+                if not worker.enabled:
+                    raise RuntimeError("云算力配置尚未启用")
+                manager.retry_staged_upload(job_id, worker)
+            else:
+                manager.retry_failed(job_id, worker if worker.enabled else None)
+            succeeded.append(job_id)
+        except Exception as exc:
+            failed.append({"id": job_id, "error": str(exc)})
+    return {
+        "ok": not failed,
+        "action": "retry-failed-all",
+        "count": len(succeeded),
+        "succeeded": succeeded,
+        "failed": failed,
+    }
+
+
 @app.delete("/api/jobs/actions/delete-finished")
 def delete_finished_jobs():
     return _bulk_job_action("delete", {"completed", "failed", "canceled"})
+
+
+@app.delete("/api/jobs/actions/delete-all")
+def delete_all_jobs():
+    statuses = {"queued", "running", "paused", "staged", "completed", "failed", "canceled"}
+    return _bulk_job_action("delete", statuses)
 
 
 @app.get("/api/jobs/{job_id}")
@@ -606,9 +693,7 @@ def retry_failed_job(job_id: str):
 @app.delete("/api/jobs/{job_id}")
 def delete_job(job_id: str):
     try:
-        job = manager.get(job_id)
-        warning = _cleanup_preuploaded_audio(job)
-        deleted = manager.delete(job_id)
+        deleted, warning = _delete_job_completely(job_id)
         return {"ok": True, "deleted": str(deleted), "warning": warning}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="任务不存在") from exc
@@ -649,7 +734,13 @@ def update_paused_job_settings(job_id: str, settings: JobEditableSettings):
 
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel_job(job_id: str):
-    return _job_action(job_id, "cancel")
+    try:
+        job, warning = _cancel_keep_logs(job_id)
+        return {**job.public(), "warning": warning}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/jobs/{job_id}/download/{output_key}")
