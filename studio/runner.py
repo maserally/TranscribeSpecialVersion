@@ -329,6 +329,30 @@ class JobManager:
         threading.Thread(target=self._run_guarded, args=(job,), daemon=True).start()
         return job
 
+    def retry_failed(
+        self,
+        job_id: str,
+        cloud_worker_settings: CloudWorkerSettings | None = None,
+    ):
+        """Retry a failed job while preserving durable stage checkpoints."""
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                raise KeyError(job_id)
+            if job.status != "failed":
+                raise RuntimeError("只有失败任务可以从检查点重试")
+            control = self.controls.get(job_id)
+            if control and not control.finished_event.is_set():
+                raise RuntimeError("任务进程仍在退出，请稍后重试")
+            job.cloud_worker_settings = cloud_worker_settings or job.cloud_worker_settings
+            job.status = "queued"
+            job.stage = "检查阶段检查点，等待续跑"
+            job.error = ""
+            self.controls[job.id] = JobControl()
+        self.update(job, log="任务将校验现有阶段产物，并从最后一个完整检查点继续")
+        threading.Thread(target=self._run_guarded, args=(job,), daemon=True).start()
+        return job
+
     def cancel(self, job_id: str):
         job = self.get(job_id)
         if not job:
@@ -535,9 +559,18 @@ class JobManager:
         language = language_info(options.source_language)
         python = sys.executable
         duration = self.media_duration(media)
+        resume_after_recognition = bool(
+            (job.progress >= 0.68 or (workdir / "recognition_checkpoint.json").is_file())
+            and (workdir / "source_sentences.json").is_file()
+            and (workdir / "vad_segments.json").is_file()
+            and (workdir / "event_segments.json").is_file()
+        )
         worker_settings = job.cloud_worker_settings
         use_cloud_worker = bool(
-            worker_settings and worker_settings.enabled and options.asr.kind == "local_whisper"
+            worker_settings
+            and worker_settings.enabled
+            and options.asr.kind in {"local_whisper", "accuracy_ensemble"}
+            and not resume_after_recognition
         )
         analysis_media = media
         if use_cloud_worker:
@@ -586,11 +619,21 @@ class JobManager:
         self.update(job, status="running", stage="声音活动检测", progress=0.03, log=f"视频时长 {duration:.2f} 秒")
 
         vad_path = workdir / "vad_segments.json"
-        self.run_command(
-            job,
-            [python, str(ROOT / "vad_scan.py"), str(analysis_media), "--output", str(vad_path), "--mode", "3"],
-        )
-        vad_segments = json.loads(vad_path.read_text(encoding="utf-8"))
+        if vad_path.exists():
+            try:
+                vad_segments = json.loads(vad_path.read_text(encoding="utf-8"))
+                self.update(job, log=f"复用声音活动检查点 {len(vad_segments)} 段")
+            except (OSError, json.JSONDecodeError, TypeError):
+                vad_path.unlink(missing_ok=True)
+                vad_segments = None
+        else:
+            vad_segments = None
+        if vad_segments is None:
+            self.run_command(
+                job,
+                [python, str(ROOT / "vad_scan.py"), str(analysis_media), "--output", str(vad_path), "--mode", "3"],
+            )
+            vad_segments = json.loads(vad_path.read_text(encoding="utf-8"))
 
         worker = None
         if use_cloud_worker:
@@ -601,21 +644,35 @@ class JobManager:
                 checkpoint=lambda: self.checkpoint(job),
             )
             job.cloud_session = worker
-            worker.prepare_job(job.id, analysis_media)
+            worker.prepare_job(
+                job.id,
+                analysis_media,
+                accuracy=options.asr.kind == "accuracy_ensemble",
+            )
 
         events_path = workdir / "event_segments.json"
         self.update(job, stage="喘息与语音分类", progress=0.12)
-        if worker:
-            worker.run_event_gate(vad_path, events_path)
+        if events_path.exists():
+            try:
+                events = json.loads(events_path.read_text(encoding="utf-8"))
+                self.update(job, log=f"复用声音分类检查点 {len(events)} 段")
+            except (OSError, json.JSONDecodeError, TypeError):
+                events_path.unlink(missing_ok=True)
+                events = None
         else:
-            self.run_command(
-                job,
-                [
-                    python, str(ROOT / "audio_event_gate.py"), str(analysis_media),
-                    "--vad", str(vad_path), "--output", str(events_path),
-                ],
-            )
-        events = json.loads(events_path.read_text(encoding="utf-8"))
+            events = None
+        if events is None:
+            if worker:
+                worker.run_event_gate(vad_path, events_path)
+            else:
+                self.run_command(
+                    job,
+                    [
+                        python, str(ROOT / "audio_event_gate.py"), str(analysis_media),
+                        "--vad", str(vad_path), "--output", str(events_path),
+                    ],
+                )
+            events = json.loads(events_path.read_text(encoding="utf-8"))
 
         def execute_whisper_asr(
             event_file: Path,
@@ -667,13 +724,35 @@ class JobManager:
                 )
 
         self.update(job, stage=f"{language['name']}语音识别", progress=0.25)
-        if options.asr.kind == "local_whisper":
+        source_path = workdir / "source_sentences.json"
+        source_checkpoint_valid = False
+        if source_path.exists():
+            try:
+                cached_source = json.loads(source_path.read_text(encoding="utf-8"))
+                source_checkpoint_valid = isinstance(cached_source, list)
+                if source_checkpoint_valid:
+                    self.update(job, log=f"复用主识别检查点 {len(cached_source)} 条")
+            except (OSError, json.JSONDecodeError, TypeError):
+                source_checkpoint_valid = False
+        if source_checkpoint_valid:
+            pass
+        elif options.asr.kind == "local_whisper":
             execute_whisper_asr(
                 events_path,
                 workdir,
                 label="primary",
                 speech_threshold=profile["speech_threshold"],
                 nonlexical_factor=profile["nonlexical_factor"],
+            )
+        elif options.asr.kind == "accuracy_ensemble":
+            if not worker:
+                raise RuntimeError("最高精度多模型识别必须启用云 GPU 运算单元")
+            worker.run_accuracy_asr(
+                events_path,
+                workdir,
+                language=options.source_language,
+                speech_threshold=min(0.06, profile["recovery_threshold"]),
+                nonlexical_factor=1.0,
             )
         elif options.asr.kind == "openai_compatible":
             def remote_progress(current, total, text):
@@ -695,11 +774,17 @@ class JobManager:
         else:
             raise ValueError(f"不支持的 ASR 提供方：{options.asr.kind}")
 
-        source_path = workdir / "source_sentences.json"
         initial_source = json.loads(source_path.read_text(encoding="utf-8"))
         if initial_source and options.verifier_model and options.verifier_model != options.asr.model:
             self.update(job, stage="第二模型复核", progress=0.46)
-            execute_whisper_review(source_path, workdir, label="primary")
+            existing_review = (
+                (workdir / "source_final.json").exists()
+                and (workdir / "model_comparison.json").exists()
+            )
+            if existing_review:
+                self.update(job, log="复用第二模型复核检查点")
+            else:
+                execute_whisper_review(source_path, workdir, label="primary")
             primary_path = workdir / "source_final.json"
         else:
             primary_path = source_path
@@ -749,23 +834,34 @@ class JobManager:
                 recovery_events_path.write_text(
                     json.dumps(recovery_events, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
-                execute_whisper_asr(
-                    recovery_events_path,
-                    recovery_root,
-                    label="gap_recovery",
-                    speech_threshold=profile["recovery_threshold"],
-                    nonlexical_factor=max(1.0, profile["nonlexical_factor"] - 0.1),
-                )
                 recovery_medium = recovery_root / "source_sentences.json"
-                if json.loads(recovery_medium.read_text(encoding="utf-8")):
-                    execute_whisper_review(
-                        recovery_medium, recovery_root, label="gap_recovery"
+                recovery_final_path = recovery_root / "source_final.json"
+                recovery_comparison_path = recovery_root / "model_comparison.json"
+                recovery_complete = (
+                    recovery_medium.exists()
+                    and recovery_final_path.exists()
+                    and recovery_comparison_path.exists()
+                )
+                if recovery_complete:
+                    self.update(job, log="复用长空白召回检查点")
+                else:
+                    execute_whisper_asr(
+                        recovery_events_path,
+                        recovery_root,
+                        label="gap_recovery",
+                        speech_threshold=profile["recovery_threshold"],
+                        nonlexical_factor=max(1.0, profile["nonlexical_factor"] - 0.1),
                     )
+                if json.loads(recovery_medium.read_text(encoding="utf-8")):
+                    if not recovery_complete:
+                        execute_whisper_review(
+                            recovery_medium, recovery_root, label="gap_recovery"
+                        )
                     recovery_final = json.loads(
-                        (recovery_root / "source_final.json").read_text(encoding="utf-8")
+                        recovery_final_path.read_text(encoding="utf-8")
                     )
                     comparisons = json.loads(
-                        (recovery_root / "model_comparison.json").read_text(encoding="utf-8")
+                        recovery_comparison_path.read_text(encoding="utf-8")
                     )
                     accepted = accepted_recovery_rows(
                         recovery_final, comparisons, profile["consensus_threshold"]
@@ -797,23 +893,34 @@ class JobManager:
                 music_events_path.write_text(
                     json.dumps(music_events, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
-                execute_whisper_asr(
-                    music_events_path,
-                    music_root,
-                    label="weak_speech_recovery",
-                    speech_threshold=profile["recovery_threshold"],
-                    nonlexical_factor=max(1.0, profile["nonlexical_factor"] - 0.2),
-                )
                 music_medium = music_root / "source_sentences.json"
-                if json.loads(music_medium.read_text(encoding="utf-8")):
-                    execute_whisper_review(
-                        music_medium, music_root, label="weak_speech_recovery"
+                music_final_path = music_root / "source_final.json"
+                music_comparison_path = music_root / "model_comparison.json"
+                music_complete = (
+                    music_medium.exists()
+                    and music_final_path.exists()
+                    and music_comparison_path.exists()
+                )
+                if music_complete:
+                    self.update(job, log="复用弱对白召回检查点")
+                else:
+                    execute_whisper_asr(
+                        music_events_path,
+                        music_root,
+                        label="weak_speech_recovery",
+                        speech_threshold=profile["recovery_threshold"],
+                        nonlexical_factor=max(1.0, profile["nonlexical_factor"] - 0.2),
                     )
+                if json.loads(music_medium.read_text(encoding="utf-8")):
+                    if not music_complete:
+                        execute_whisper_review(
+                            music_medium, music_root, label="weak_speech_recovery"
+                        )
                     music_final = json.loads(
-                        (music_root / "source_final.json").read_text(encoding="utf-8")
+                        music_final_path.read_text(encoding="utf-8")
                     )
                     music_comparisons = json.loads(
-                        (music_root / "model_comparison.json").read_text(encoding="utf-8")
+                        music_comparison_path.read_text(encoding="utf-8")
                     )
                     accepted_music = accepted_recovery_rows(
                         music_final,
@@ -835,6 +942,27 @@ class JobManager:
             worker.close()
             job.cloud_session = None
 
+        recognition_checkpoint = workdir / "recognition_checkpoint.json"
+        recognition_state = {
+            "version": 1,
+            "input_size": media.stat().st_size,
+            "input_mtime_ns": media.stat().st_mtime_ns,
+            "source_language": options.source_language,
+            "profile": options.profile,
+            "asr_kind": options.asr.kind,
+            "asr_model": options.asr.model,
+            "verifier_model": options.verifier_model,
+            "cue_count": len(primary),
+            "recovered_count": recovered_count,
+            "music_recovered_count": music_recovered_count,
+            "vad_fallback_count": vad_fallback_count,
+        }
+        recognition_tmp = recognition_checkpoint.with_suffix(".tmp")
+        recognition_tmp.write_text(
+            json.dumps(recognition_state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        recognition_tmp.replace(recognition_checkpoint)
+
         self.update(job, stage="逐句翻译与否定词审计", progress=0.70)
         def translation_progress(current, total, _):
             self.checkpoint(job)
@@ -844,12 +972,35 @@ class JobManager:
                 log=(f"翻译 {current}/{total}" if current % 10 == 0 else None),
             )
 
+        translation_checkpoint = workdir / "translation_checkpoint.json"
+        existing_translation = []
+        if translation_checkpoint.exists():
+            try:
+                existing_translation = json.loads(
+                    translation_checkpoint.read_text(encoding="utf-8")
+                )
+                self.update(
+                    job,
+                    log=f"复用已校验翻译检查点 {len(existing_translation)} 条",
+                )
+            except (OSError, json.JSONDecodeError, TypeError):
+                existing_translation = []
+
+        def save_translation_checkpoint(rows):
+            temporary = translation_checkpoint.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            temporary.replace(translation_checkpoint)
+
         translated = translate_cues(
             primary,
             options.translator,
             translation_progress,
             source_language=options.source_language,
             target_language=options.target_language,
+            existing=existing_translation,
+            checkpoint=save_translation_checkpoint,
         )
         text_review_audit = {
             "enabled": False,
@@ -862,7 +1013,24 @@ class JobManager:
             "glossary": [],
         }
         text_review_audit_path = None
-        if translated:
+        text_review_checkpoint = workdir / "text_review_checkpoint.json"
+        reviewed_checkpoint = None
+        if text_review_checkpoint.exists():
+            try:
+                saved_review = json.loads(text_review_checkpoint.read_text(encoding="utf-8"))
+                if (
+                    isinstance(saved_review, dict)
+                    and isinstance(saved_review.get("cues"), list)
+                    and len(saved_review["cues"]) == len(translated)
+                ):
+                    reviewed_checkpoint = saved_review
+                    self.update(job, log=f"复用最终文本校正检查点 {len(translated)} 条")
+            except (OSError, json.JSONDecodeError, TypeError):
+                reviewed_checkpoint = None
+        if reviewed_checkpoint:
+            translated = reviewed_checkpoint["cues"]
+            text_review_audit = reviewed_checkpoint.get("audit", text_review_audit)
+        elif translated:
             self.update(job, stage="最终文本校正与全局一致性检查", progress=0.83)
 
             def text_review_progress(current, total, message):
@@ -879,6 +1047,17 @@ class JobManager:
                 text_review_progress,
                 source_language=options.source_language,
             )
+            review_checkpoint_tmp = text_review_checkpoint.with_suffix(".tmp")
+            review_checkpoint_tmp.write_text(
+                json.dumps(
+                    {"version": 1, "cues": translated, "audit": text_review_audit},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            review_checkpoint_tmp.replace(text_review_checkpoint)
+        if translated:
             text_review_audit_path = output_dir / f"{stem}_最终文本校正记录.json"
             text_review_audit_path.write_text(
                 json.dumps(text_review_audit, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -890,7 +1069,7 @@ class JobManager:
                     f"安全回退 {text_review_audit['rejected_count']} 条"
                 ),
             )
-        review_cues = finalize_cues(
+        review_output_cues = finalize_cues(
             translated,
             min_duration=0.85,
             remove_periods=options.remove_chinese_periods,
@@ -903,12 +1082,12 @@ class JobManager:
             publish=True,
         )
         review_files = write_subtitles(
-            review_cues, output_dir, stem, "高置信校对版", options.source_language
+            review_output_cues, output_dir, stem, "高置信校对版", options.source_language
         )
         publish_files = write_subtitles(
             publish_cues, output_dir, stem, "观看版", options.source_language
         )
-        final_cues = publish_cues if options.publish_mode else review_cues
+        final_cues = publish_cues if options.publish_mode else review_output_cues
         final_files = publish_files if options.publish_mode else review_files
 
         summary = quality_summary(final_cues, duration, activity_segments=vad_segments)

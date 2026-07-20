@@ -91,15 +91,35 @@ class OpenAICompatibleProvider:
             ],
             "response_format": {"type": "json_object"},
         }
-        response = self.client.post(f"{self.base_url}/chat/completions", json=payload)
-        if response.status_code >= 400:
-            payload.pop("response_format", None)
+        parse_error: ValueError | None = None
+        for attempt in range(3):
+            if attempt:
+                payload["messages"] = [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "system",
+                        "content": (
+                            "The previous response was invalid JSON. Return exactly one complete "
+                            "JSON object with double-quoted keys and values; do not omit commas."
+                        ),
+                    },
+                    {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+                ]
             response = self.client.post(f"{self.base_url}/chat/completions", json=payload)
-        _raise_provider_error(response)
-        content = response.json()["choices"][0]["message"]["content"]
-        if isinstance(content, list):
-            content = "".join(str(x.get("text", "")) for x in content if isinstance(x, dict))
-        return _json_from_text(str(content))
+            if response.status_code >= 400 and "response_format" in payload:
+                payload.pop("response_format", None)
+                response = self.client.post(f"{self.base_url}/chat/completions", json=payload)
+            _raise_provider_error(response)
+            content = response.json()["choices"][0]["message"]["content"]
+            if isinstance(content, list):
+                content = "".join(
+                    str(x.get("text", "")) for x in content if isinstance(x, dict)
+                )
+            try:
+                return _json_from_text(str(content))
+            except ValueError as exc:
+                parse_error = exc
+        raise RuntimeError("远程模型连续 3 次返回无效 JSON，已停止当前句以避免错位") from parse_error
 
     def transcribe(self, model: str, wav_path: Path, language: str = "ja") -> dict[str, Any]:
         data = {
@@ -142,9 +162,24 @@ class OllamaProvider:
                 {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
             ],
         }
-        response = self.client.post(f"{self.base_url}/api/chat", json=payload)
-        _raise_provider_error(response)
-        return _json_from_text(response.json()["message"]["content"])
+        parse_error: ValueError | None = None
+        for attempt in range(3):
+            if attempt:
+                payload["messages"] = [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "system",
+                        "content": "上次响应不是完整 JSON。只返回一个完整 JSON 对象，键和值使用双引号，不要漏逗号。",
+                    },
+                    {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+                ]
+            response = self.client.post(f"{self.base_url}/api/chat", json=payload)
+            _raise_provider_error(response)
+            try:
+                return _json_from_text(response.json()["message"]["content"])
+            except ValueError as exc:
+                parse_error = exc
+        raise RuntimeError("本地模型连续 3 次返回无效 JSON，已停止当前句以避免错位") from parse_error
 
 
 def cached_whisper_models(cache_dir: Path | None = None) -> list[str]:

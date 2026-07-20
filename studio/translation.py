@@ -141,13 +141,20 @@ def translate_cues(
     *,
     source_language: str = "ja",
     target_language: str = "zh-CN",
+    existing: list[dict[str, Any]] | None = None,
+    checkpoint: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     if target_language != "zh-CN":
         raise ValueError(f"不支持的目标语言：{target_language}")
     provider = provider_from_settings(settings)
     system_prompt = SYSTEM_PROMPTS[source_language]
-    output = []
-    for index, source in enumerate(rows):
+    output: list[dict[str, Any]] = []
+    for index, saved in enumerate(existing or []):
+        if index >= len(rows) or source_text(saved) != source_text(rows[index]):
+            break
+        output.append(dict(saved))
+    for index in range(len(output), len(rows)):
+        source = rows[index]
         row = dict(source)
         context = []
         for i in range(max(0, index - 4), min(len(rows), index + 5)):
@@ -198,6 +205,8 @@ def translate_cues(
         row.pop("ja", None)
         row["zh"] = zh
         output.append(row)
+        if checkpoint:
+            checkpoint(output)
         if progress:
             progress(index + 1, len(rows), zh)
     return output

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.13.3">
+  <link rel="stylesheet" href="/static/style.css?v=1.14.1">
 </head>
 <body>
   <main class="shell">
@@ -75,7 +75,7 @@
       <div class="panel provider" id="asr-panel">
         <h2 id="asr-title">3. 日语识别模型</h2>
         <label>提供方
-          <select id="asr-kind"><option value="local_whisper">本地 Whisper</option><option value="openai_compatible">OpenAI 兼容接口</option></select>
+          <select id="asr-kind"><option value="local_whisper">本地 Whisper</option><option value="accuracy_ensemble">云端最高精度多模型</option><option value="openai_compatible">OpenAI 兼容接口</option></select>
           <small class="field-help">本地 Whisper 不发送音频到网络；兼容接口适合使用云端或局域网 ASR 服务</small>
         </label>
         <div class="remote-fields hidden" data-for="asr">
@@ -123,9 +123,10 @@
         <label>SSH 密码<input id="cloud-worker-password" type="password" autocomplete="off"><small class="field-help">使用 Windows DPAPI 加密保存在本机，不进入任务记录或 Git</small></label>
         <label>私钥路径（与密码二选一）<input id="cloud-worker-key" placeholder="C:\Users\你\.ssh\id_ed25519"></label>
         <label>云端工作目录<input id="cloud-worker-dir" value="/root/subtitle-worker"></label>
+        <label>云端模型数据盘目录<input id="cloud-worker-model-dir" value="/root/autodl-tmp/subtitle-models"><small class="field-help">Qwen、Cohere 和对齐模型只保存在数据盘；安装前要求至少 35GB 可用空间</small></label>
       </div>
       <label><input id="cloud-worker-auto-setup" type="checkbox" checked>首次 GPU 处理时自动安装 Python 环境、FFmpeg 和 Whisper 运算依赖</label>
-      <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">连接并安装运算环境</button><button id="stage-cloud" type="button">无卡模式：预上传所选音轨</button><span id="cloud-worker-status" class="muted"></span></div>
+      <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">连接并安装运算环境</button><button id="bootstrap-accuracy-worker" type="button">安装最高精度模型</button><button id="stage-cloud" type="button">无卡模式：预上传所选音轨</button><span id="cloud-worker-status" class="muted"></span></div>
       <small class="field-help">预上传使用上方已经选择的单个视频或批量文件，在云端通过文件大小和 SHA-256 双重校验；不安装模型，也不需要 GPU。无卡模式下不要点击“连接并安装运算环境”。</small>
     </section>
 
@@ -147,6 +148,6 @@
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.13.3"></script>
+  <script src="/static/app.js?v=1.14.1"></script>
 </body>
 </html>

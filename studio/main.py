@@ -53,7 +53,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.13.6")
+app = FastAPI(title="字幕翻译工作室", version="1.14.1")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -151,6 +151,8 @@ def provider_models(request: ModelListRequest):
             models = OpenAICompatibleProvider(provider.base_url, provider.api_key).list_models()
         elif provider.kind == "local_whisper":
             models = [item["id"] for item in whisper_model_catalog()]
+        elif provider.kind == "accuracy_ensemble":
+            models = ["accuracy-ensemble-v1"]
         else:
             raise ValueError("不支持的模型提供方")
         return {"models": models}
@@ -203,8 +205,10 @@ def create_job(options: JobOptions):
         options.output_dir = str(output_dir)
     saved = load_provider_settings(expose_secrets=True)
     worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    if options.asr.kind == "accuracy_ensemble" and not worker.enabled:
+        raise HTTPException(status_code=400, detail="最高精度多模型识别必须启用云 GPU 运算单元")
     if options.cloud_stage_only and (
-        not worker.enabled or options.asr.kind != "local_whisper"
+        not worker.enabled or options.asr.kind not in {"local_whisper", "accuracy_ensemble"}
     ):
         raise HTTPException(
             status_code=400,
@@ -331,8 +335,11 @@ def create_folder_jobs(request: FolderBatchRequest):
     saved = load_provider_settings(expose_secrets=True)
     worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
     base_options = resolve_provider_api_keys(request.options)
+    if base_options.asr.kind == "accuracy_ensemble" and not worker.enabled:
+        raise HTTPException(status_code=400, detail="最高精度多模型识别必须启用云 GPU 运算单元")
     if base_options.cloud_stage_only and (
-        not worker.enabled or base_options.asr.kind != "local_whisper"
+        not worker.enabled
+        or base_options.asr.kind not in {"local_whisper", "accuracy_ensemble"}
     ):
         raise HTTPException(
             status_code=400,
@@ -376,6 +383,20 @@ def bootstrap_cloud_worker(request: CloudWorkerRequest):
     try:
         worker.connect()
         result = worker.bootstrap()
+        return {"ok": True, **result}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        worker.close()
+
+
+@app.post("/api/cloud-worker/bootstrap-accuracy")
+def bootstrap_accuracy_worker(request: CloudWorkerRequest):
+    worker = CloudWhisperWorker(request.cloud_worker)
+    try:
+        worker.connect()
+        worker.bootstrap()
+        result = worker.bootstrap_accuracy()
         return {"ok": True, **result}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -557,6 +578,22 @@ def retry_staged_job(job_id: str):
         raise HTTPException(status_code=400, detail="请先启用并保存云 GPU 运算单元配置")
     try:
         return manager.retry_staged_upload(job_id, worker).public()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/jobs/{job_id}/retry")
+def retry_failed_job(job_id: str):
+    saved = load_provider_settings(expose_secrets=True)
+    worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    try:
+        job = manager.get(job_id)
+        if not job:
+            raise KeyError(job_id)
+        job.options = resolve_provider_api_keys(job.options)
+        return manager.retry_failed(job_id, worker if worker.enabled else None).public()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="任务不存在") from exc
     except RuntimeError as exc:

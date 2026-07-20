@@ -3,7 +3,9 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 
-ProviderKind = Literal["local_whisper", "local_ollama", "openai_compatible"]
+ProviderKind = Literal[
+    "local_whisper", "accuracy_ensemble", "local_ollama", "openai_compatible"
+]
 QualityProfile = Literal["precision", "balanced", "recall"]
 SourceLanguage = Literal["ja", "ko"]
 
@@ -23,6 +25,7 @@ class CloudWorkerSettings(BaseModel):
     password: str = ""
     private_key_path: str = ""
     remote_dir: str = "/root/subtitle-worker"
+    model_dir: str = "/root/autodl-tmp/subtitle-models"
     auto_setup: bool = True
 
 

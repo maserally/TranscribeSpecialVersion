@@ -83,6 +83,7 @@ def load_provider_settings(*, expose_secrets: bool | None = None) -> dict[str, A
             "password": "",
             "private_key_path": "",
             "remote_dir": "/root/subtitle-worker",
+            "model_dir": "/root/autodl-tmp/subtitle-models",
             "auto_setup": True,
         },
     }
@@ -104,7 +105,7 @@ def load_provider_settings(*, expose_secrets: bool | None = None) -> dict[str, A
             worker = stored.get("cloud_worker", {})
             for key in (
                 "enabled", "host", "port", "username", "private_key_path",
-                "remote_dir", "auto_setup",
+                "remote_dir", "model_dir", "auto_setup",
             ):
                 if key in worker:
                     defaults["cloud_worker"][key] = worker[key]
@@ -163,6 +164,9 @@ def save_provider_settings(settings: dict[str, Any]) -> Path:
         ),
         "private_key_path": str(worker.get("private_key_path", "")).strip(),
         "remote_dir": str(worker.get("remote_dir", "/root/subtitle-worker")).strip(),
+        "model_dir": str(
+            worker.get("model_dir", "/root/autodl-tmp/subtitle-models")
+        ).strip(),
         "auto_setup": bool(worker.get("auto_setup", True)),
     }
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
