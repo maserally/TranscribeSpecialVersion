@@ -63,8 +63,12 @@ def review_reasons(row: dict) -> list[str]:
 
 
 def needs_third_vote(qwen_text: str, cohere_text: str, threshold: float = 0.72) -> bool:
-    if not normalize_transcript(cohere_text):
+    qwen = normalize_transcript(qwen_text)
+    cohere = normalize_transcript(cohere_text)
+    if not qwen and not cohere:
         return False
+    if not qwen or not cohere:
+        return True
     return transcript_similarity(qwen_text, cohere_text) < threshold
 
 
@@ -95,7 +99,67 @@ def choose_consensus(qwen_text: str, cohere_text: str, whisper_text: str) -> tup
     return candidates[winner], winner, similarities
 
 
-def select_windows(events: list[dict], speech_threshold: float, nonlexical_factor: float) -> list[dict]:
+def _scores_for_range(events: list[dict], start: float, end: float) -> tuple[float, float]:
+    overlaps = [
+        row for row in events
+        if float(row.get("end", 0)) > start and float(row.get("start", 0)) < end
+    ]
+    if not overlaps:
+        return 0.0, 0.0
+    return (
+        max(float(row.get("speech_score", 0)) for row in overlaps),
+        max(float(row.get("nonlexical_score", 0)) for row in overlaps),
+    )
+
+
+def full_coverage_windows(
+    events: list[dict],
+    duration: float,
+    *,
+    core_seconds: float = 16.0,
+    context_seconds: float = 2.0,
+) -> list[dict]:
+    """Partition all audio into cores with context; event scores never drop audio."""
+    duration = max(0.0, float(duration))
+    core_seconds = max(4.0, float(core_seconds))
+    context_seconds = max(0.0, float(context_seconds))
+    windows: list[dict] = []
+    core_start = 0.0
+    index = 0
+    while core_start < duration:
+        core_end = min(duration, core_start + core_seconds)
+        start = max(0.0, core_start - context_seconds)
+        end = min(duration, core_end + context_seconds)
+        speech_score, nonlexical_score = _scores_for_range(events, core_start, core_end)
+        windows.append(
+            {
+                "window_index": index,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "core_start": round(core_start, 3),
+                "core_end": round(core_end, 3),
+                "speech_score": speech_score,
+                "nonlexical_score": nonlexical_score,
+                "coverage_origin": "full_audio",
+            }
+        )
+        index += 1
+        core_start = core_end
+    return windows
+
+
+def select_windows(
+    events: list[dict],
+    speech_threshold: float,
+    nonlexical_factor: float,
+    *,
+    duration: float | None = None,
+    full_coverage: bool = False,
+) -> list[dict]:
+    if full_coverage:
+        if duration is None:
+            duration = max((float(row.get("end", 0)) for row in events), default=0.0)
+        return full_coverage_windows(events, duration)
     selected = [
         row for row in events
         if float(row.get("speech_score", 0)) >= speech_threshold

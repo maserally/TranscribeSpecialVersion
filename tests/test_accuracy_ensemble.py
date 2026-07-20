@@ -2,6 +2,7 @@ import unittest
 
 from ensemble_common import (
     choose_consensus,
+    full_coverage_windows,
     needs_third_vote,
     normalize_transcript,
     review_reasons,
@@ -19,6 +20,11 @@ class AccuracyEnsembleTests(unittest.TestCase):
 
     def test_disagreement_starts_whisper(self):
         self.assertTrue(needs_third_vote("毎日お参りします", "ごぼうは人参です"))
+
+    def test_one_model_empty_starts_whisper(self):
+        self.assertTrue(needs_third_vote("小さい声です", ""))
+        self.assertTrue(needs_third_vote("", "小さい声です"))
+        self.assertFalse(needs_third_vote("", ""))
 
     def test_third_vote_selects_pairwise_consensus(self):
         text, winner, scores = choose_consensus(
@@ -55,6 +61,19 @@ class AccuracyEnsembleTests(unittest.TestCase):
         windows = select_windows(rows, 0.1, 1.0)
         self.assertEqual(len(windows), 1)
         self.assertAlmostEqual(windows[0]["start"], 0.78)
+
+    def test_full_coverage_never_drops_noise_masked_audio(self):
+        rows = [
+            {"start": 0.0, "end": 8.0, "speech_score": 0.0, "nonlexical_score": 0.9},
+            {"start": 8.0, "end": 20.0, "speech_score": 0.05, "nonlexical_score": 0.8},
+        ]
+        windows = full_coverage_windows(rows, 33.0, core_seconds=16.0, context_seconds=2.0)
+        self.assertEqual(
+            [(row["core_start"], row["core_end"]) for row in windows],
+            [(0.0, 16.0), (16.0, 32.0), (32.0, 33.0)],
+        )
+        self.assertEqual(windows[1]["start"], 14.0)
+        self.assertEqual(windows[1]["end"], 33.0)
 
     def test_similarity_is_symmetric(self):
         left = transcript_similarity("テストです", "テストでした")

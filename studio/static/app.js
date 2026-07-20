@@ -126,7 +126,7 @@ function updateModelHelp(){
   const asr=modelValue('#asr-model'), verifier=modelValue('#verifier-model');
   $('#asr-title').textContent=`3. ${language.name}识别模型`;
   const cloudGpu=$('#cloud-worker-enabled').checked;
-  $('#asr-model-help').textContent=$('#asr-kind').value==='accuracy_ensemble'?'Qwen3-ASR 主识别；Cohere 复核低置信；large-v3 仅裁决冲突；Qwen ForcedAligner 对齐时间轴。按 4/4/8 批量并行运行':(cloudGpu?`${asr||'所选模型'} 将在云 GPU 运行；本机只上传提取后的 FLAC 音轨`:($('#asr-kind').value==='local_whisper'?(whisperHelp[asr]||'本地 Whisper 模型；未缓存时首次使用需要下载'):(asr.startsWith('gpt-4o')&&asr.includes('transcribe')?'gpt-4o-transcribe 使用逐个 VAD 窗口转写，时间轴精度略低于 Whisper 分段时间戳':'远程模型如支持 verbose_json.segments 将使用精细时间轴')));
+  $('#asr-model-help').textContent=$('#asr-kind').value==='accuracy_ensemble'?'全音频覆盖：Qwen3-ASR 主识别；Cohere 复核全部窗口；large-v3 仅裁决冲突；Qwen ForcedAligner 对齐时间轴。VAD 不再删除轻声或噪声遮蔽对白':(cloudGpu?`${asr||'所选模型'} 将在云 GPU 运行；本机只上传提取后的 FLAC 音轨`:($('#asr-kind').value==='local_whisper'?(whisperHelp[asr]||'本地 Whisper 模型；未缓存时首次使用需要下载'):(asr.startsWith('gpt-4o')&&asr.includes('transcribe')?'gpt-4o-transcribe 使用逐个 VAD 窗口转写，时间轴精度略低于 Whisper 分段时间戳':'远程模型如支持 verbose_json.segments 将使用精细时间轴')));
   $('#verifier-model-help').textContent=`${whisperHelp[verifier]||'Whisper 复核模型'}；${cloudGpu?'在云 GPU':'在本机'}只复核初筛对白，不会全片重复识别`;
   $('#translator-model-help').textContent=$('#translator-kind').value==='local_ollama'?`本地逐句${language.pair}；请先在 Ollama 中安装所选模型`:`远程逐句${language.pair}；需要支持 Chat Completions 和 JSON 输出`;
   $('#text-reviewer-model-help').textContent=$('#text-reviewer-kind').value==='local_ollama'?'自动本地校正；按批次读取前后文，只改文字和术语一致性':'自动云端校正；需要支持 Chat Completions 和 JSON 输出，不修改时间轴';

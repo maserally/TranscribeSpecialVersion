@@ -14,7 +14,17 @@ LANGUAGE_NAMES = {"ja": "Japanese", "ko": "Korean"}
 SENTENCE_END = re.compile(r"[。！？!?]$")
 
 
-def split_tokens(tokens, window_start: float, language: str, winner: str) -> list[dict]:
+def split_tokens(
+    tokens,
+    window_start: float,
+    language: str,
+    winner: str,
+    *,
+    core_start: float,
+    core_end: float,
+    window_index: int,
+    confidence: str,
+) -> list[dict]:
     sentences: list[dict] = []
     current = []
 
@@ -32,11 +42,19 @@ def split_tokens(tokens, window_start: float, language: str, winner: str) -> lis
                     "source": text,
                     "asr_engine": "qwen-cohere-whisper-ensemble",
                     "ensemble_winner": winner,
+                    "ensemble_confidence": confidence,
+                    "window_index": window_index,
                 }
             )
         current = []
 
-    for token in tokens:
+    token_items = getattr(tokens, "items", tokens)
+    for token in token_items:
+        midpoint = window_start + (
+            float(token.start_time) + float(token.end_time)
+        ) / 2
+        if midpoint < core_start or midpoint >= core_end:
+            continue
         if current:
             duration = float(current[-1].end_time) - float(current[0].start_time)
             chars = sum(len(str(item.text).strip()) for item in current)
@@ -67,11 +85,30 @@ def main():
     model = Qwen3ForcedAligner.from_pretrained(
         args.model, dtype=torch.bfloat16, device_map="cuda:0"
     )
+    output_path = Path(args.output)
     sentences: list[dict] = []
+    if output_path.exists():
+        try:
+            cached = json.loads(output_path.read_text(encoding="utf-8"))
+            if isinstance(cached, list) and all(
+                isinstance(row, dict) and "window_index" in row for row in cached
+            ):
+                sentences = cached
+        except (OSError, json.JSONDecodeError, TypeError):
+            sentences = []
+    completed = {
+        int(row["window_index"]) for row in sentences if "window_index" in row
+    }
     active_rows = [row for row in rows if str(row.get("final_source") or "").strip()]
+    pending_rows = [
+        row for row in active_rows
+        if int(row.get("window_index", -1)) not in completed
+    ]
+    if completed:
+        print(f"Qwen3-ForcedAligner resumed={len(completed)} pending={len(pending_rows)}", flush=True)
     batch_size = max(1, args.batch_size)
-    for offset in range(0, len(active_rows), batch_size):
-        batch = active_rows[offset : offset + batch_size]
+    for offset in range(0, len(pending_rows), batch_size):
+        batch = pending_rows[offset : offset + batch_size]
         clips = [
             (audio[int(row["start"] * sample_rate) : int(row["end"] * sample_rate)], sample_rate)
             for row in batch
@@ -88,29 +125,35 @@ def main():
                 float(row["start"]),
                 args.language,
                 str(row.get("ensemble_winner", "qwen")),
+                core_start=float(row.get("core_start", row["start"])),
+                core_end=float(row.get("core_end", row["end"])),
+                window_index=int(row.get("window_index", 0)),
+                confidence=str(row.get("ensemble_confidence", "unknown")),
             )
             if not aligned_rows:
                 aligned_rows = [
                     {
-                        "start": round(float(row["start"]), 3),
-                        "end": round(float(row["end"]), 3),
+                        "start": round(float(row.get("core_start", row["start"])), 3),
+                        "end": round(float(row.get("core_end", row["end"])), 3),
                         "source": text,
                         "asr_engine": "qwen-cohere-whisper-ensemble",
                         "ensemble_winner": row.get("ensemble_winner", "qwen"),
+                        "ensemble_confidence": row.get("ensemble_confidence", "unknown"),
+                        "window_index": int(row.get("window_index", 0)),
                         "alignment_fallback": True,
                     }
                 ]
             sentences.extend(aligned_rows)
         print(
-            f"Qwen3-ForcedAligner {min(offset + len(batch), len(active_rows))}/{len(active_rows)}",
+            f"Qwen3-ForcedAligner {len(completed) + min(offset + len(batch), len(pending_rows))}/{len(active_rows)}",
             flush=True,
         )
-        Path(args.output).write_text(
+        output_path.write_text(
             json.dumps(sentences, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
     sentences.sort(key=lambda item: (item["start"], item["end"]))
-    Path(args.output).write_text(json.dumps(sentences, ensure_ascii=False, indent=2), encoding="utf-8")
+    output_path.write_text(json.dumps(sentences, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"aligned sentences={len(sentences)}", flush=True)
 
 

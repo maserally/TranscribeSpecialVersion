@@ -243,7 +243,7 @@ touch {remote}/.worker-ready-v2
         script = f"""set -euo pipefail
 export OMP_NUM_THREADS=4
 mkdir -p {models}
-if [ -f {models}/.accuracy-ready-v1 ] \
+if [ -f {models}/.accuracy-ready-v2 ] \
   && [ -f {models}/weights/Qwen3-ASR-1.7B/config.json ] \
   && [ -f {models}/weights/Qwen3-ForcedAligner-0.6B/config.json ] \
   && [ -f {models}/weights/cohere-transcribe-03-2026/config.json ] \
@@ -270,7 +270,7 @@ fi
 ) & qwen_pip=$!
 (
   {models}/envs/cohere/bin/python -m pip install -U pip
-  {models}/envs/cohere/bin/python -m pip install -U 'transformers>=5.4.0' accelerate sentencepiece protobuf soundfile librosa modelscope
+  {models}/envs/cohere/bin/python -m pip install -U 'transformers>=5.4.0' accelerate sentencepiece protobuf soundfile librosa huggingface_hub
 ) & cohere_pip=$!
 wait "$qwen_pip"
 wait "$cohere_pip"
@@ -281,7 +281,13 @@ wait "$cohere_pip"
   [ -f {models}/weights/Qwen3-ForcedAligner-0.6B/config.json ] || {models}/envs/qwen/bin/modelscope download --model Qwen/Qwen3-ForcedAligner-0.6B --local_dir {models}/weights/Qwen3-ForcedAligner-0.6B
 ) & align_model=$!
 (
-  [ -f {models}/weights/cohere-transcribe-03-2026/config.json ] || {models}/envs/cohere/bin/modelscope download --model CohereLabs/cohere-transcribe-03-2026 --local_dir {models}/weights/cohere-transcribe-03-2026
+  if [ ! -f {models}/weights/cohere-transcribe-03-2026/config.json ]; then
+    export HF_ENDPOINT="${{HF_ENDPOINT:-https://hf-mirror.com}}"
+    if ! {models}/envs/cohere/bin/hf download CohereLabs/cohere-transcribe-03-2026 --local-dir {models}/weights/cohere-transcribe-03-2026; then
+      echo "Cohere Transcribe is gated. Accept its model license, run 'hf auth login' on the cloud node, then retry; HF_ENDPOINT may point to a reachable mirror." >&2
+      exit 24
+    fi
+  fi
 ) & cohere_model=$!
 wait "$qwen_model"
 wait "$align_model"
@@ -300,7 +306,7 @@ done
 sha256sum {models}/weights/whisper/large-v3.pt > {models}/manifests/whisper-large-v3.sha256
 {models}/envs/qwen/bin/python -c 'import torch, qwen_asr; assert torch.cuda.is_available()'
 {models}/envs/cohere/bin/python -c 'import torch, transformers; assert torch.cuda.is_available(); print(transformers.__version__)'
-touch {models}/.accuracy-ready-v1
+touch {models}/.accuracy-ready-v2
 df -h {models}
 """
         output = self._exec("bash -lc " + shlex.quote(script), timeout=7200)
@@ -544,7 +550,7 @@ df -h {models}
                 cohere_python, posixpath.join(scripts, "cohere_review_stage.py"), audio,
                 "--input", primary, "--output", reviewed,
                 "--model", posixpath.join(models, "weights", "cohere-transcribe-03-2026"),
-                "--language", language, "--batch-size", "4",
+                "--language", language, "--batch-size", "4", "--review-all",
             ],
             [
                 whisper_python, posixpath.join(scripts, "whisper_conflict_vote.py"), audio,

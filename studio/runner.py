@@ -775,7 +775,12 @@ class JobManager:
             raise ValueError(f"不支持的 ASR 提供方：{options.asr.kind}")
 
         initial_source = json.loads(source_path.read_text(encoding="utf-8"))
-        if initial_source and options.verifier_model and options.verifier_model != options.asr.model:
+        if (
+            initial_source
+            and options.asr.kind != "accuracy_ensemble"
+            and options.verifier_model
+            and options.verifier_model != options.asr.model
+        ):
             self.update(job, stage="第二模型复核", progress=0.46)
             existing_review = (
                 (workdir / "source_final.json").exists()
@@ -1097,6 +1102,22 @@ class JobManager:
         summary["vad_fallback_segments"] = vad_fallback_count
         summary["input_duration"] = duration
         summary["source_language"] = language["name"]
+        ensemble_audit = []
+        ensemble_audit_path = workdir / "ensemble_audit.json"
+        if ensemble_audit_path.exists():
+            try:
+                loaded_audit = json.loads(ensemble_audit_path.read_text(encoding="utf-8"))
+                if isinstance(loaded_audit, list):
+                    ensemble_audit = loaded_audit
+            except (OSError, json.JSONDecodeError, TypeError):
+                pass
+        summary["ensemble_window_count"] = len(ensemble_audit)
+        summary["ensemble_consensus_count"] = sum(
+            row.get("confidence") == "two_model_consensus" for row in ensemble_audit
+        )
+        summary["ensemble_low_confidence_count"] = sum(
+            row.get("confidence") == "single_model_low_confidence" for row in ensemble_audit
+        )
         warning_items = [
             {
                 "start": float(row["start"]),
@@ -1193,6 +1214,9 @@ class JobManager:
 - VAD 长空白兜底：复查 {summary['vad_fallback_segments']} 段
 - VAD 活动覆盖率：{summary['activity_coverage_percent']}%
 - 最长空白：{summary['longest_gap']} 秒
+- 多模型全音频窗口：{summary.get('ensemble_window_count', 0)} 个
+- 两模型以上形成共识：{summary.get('ensemble_consensus_count', 0)} 个
+- 仅单模型支持、需关注：{summary.get('ensemble_low_confidence_count', 0)} 个
 
 ## 超过 30 秒的空白区间
 

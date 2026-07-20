@@ -6,7 +6,12 @@ from pathlib import Path
 
 import soundfile as sf
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+from transformers import AutoProcessor
+
+try:
+    from transformers import CohereAsrForConditionalGeneration
+except ImportError:  # transformers before native Cohere ASR support
+    from transformers import AutoModelForSpeechSeq2Seq as CohereAsrForConditionalGeneration
 
 from ensemble_common import needs_third_vote, transcript_similarity
 
@@ -19,20 +24,41 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--language", choices=("ja", "ko"), required=True)
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--review-all", action="store_true")
     args = parser.parse_args()
 
     rows = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    output_path = Path(args.output)
+    if output_path.exists():
+        try:
+            cached_rows = json.loads(output_path.read_text(encoding="utf-8"))
+            cached_by_index = {
+                int(row["window_index"]): row
+                for row in cached_rows if isinstance(row, dict) and "window_index" in row
+            }
+            for row in rows:
+                cached = cached_by_index.get(int(row.get("window_index", -1)))
+                if cached and "cohere_source" in cached:
+                    for key in (
+                        "cohere_source", "qwen_cohere_similarity", "needs_third_vote"
+                    ):
+                        row[key] = cached.get(key)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
     audio, sample_rate = sf.read(args.media, dtype="float32", always_2d=False)
     if getattr(audio, "ndim", 1) > 1:
         audio = audio.mean(axis=1)
-    review_indices = [index for index, row in enumerate(rows) if row.get("needs_review")]
+    review_indices = [
+        index for index, row in enumerate(rows)
+        if "cohere_source" not in row and (args.review_all or row.get("needs_review"))
+    ]
     if not review_indices:
-        Path(args.output).write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        output_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
         print("Cohere review skipped: no low-confidence windows", flush=True)
         return
 
     processor = AutoProcessor.from_pretrained(args.model, local_files_only=True)
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+    model = CohereAsrForConditionalGeneration.from_pretrained(
         args.model, local_files_only=True, dtype=torch.bfloat16, device_map="cuda:0"
     ).eval()
     batch_size = max(1, args.batch_size)
@@ -44,12 +70,25 @@ def main():
             for index in indices
         ]
         inputs = processor(
-            clips, sampling_rate=sample_rate, return_tensors="pt", language=args.language
+            audio=clips,
+            sampling_rate=sample_rate,
+            return_tensors="pt",
+            language=args.language,
+            punctuation=False,
+            padding=True,
         )
+        audio_chunk_index = inputs.get("audio_chunk_index")
         inputs.to(model.device, dtype=model.dtype)
         with torch.inference_mode():
             output_ids = model.generate(**inputs, max_new_tokens=384, do_sample=False)
-        decoded = processor.batch_decode(output_ids, skip_special_tokens=True)
+        decoded = processor.decode(
+            output_ids,
+            skip_special_tokens=True,
+            audio_chunk_index=audio_chunk_index,
+            language=args.language,
+        )
+        if isinstance(decoded, str):
+            decoded = [decoded]
         for index, text in zip(indices, decoded):
             row = rows[index]
             row["cohere_source"] = str(text or "").strip()
@@ -61,8 +100,9 @@ def main():
             )
         reviewed += len(indices)
         print(f"Cohere review {reviewed}/{len(review_indices)}", flush=True)
+        output_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    Path(args.output).write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    output_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     print(
         f"Cohere reviewed={len(review_indices)} conflicts={sum(bool(x.get('needs_third_vote')) for x in rows)}",
         flush=True,
