@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 from studio.main import _bulk_job_action, _resume_paused_job, app
 from studio.providers import supports_segment_timestamps
 from studio.remote_asr import _remote_packs
-from studio.runner import JobControl, JobManager, JobState
+from studio.runner import JobControl, JobManager, JobState, WeightedGpuScheduler
 from studio.providers import _json_from_text
 from studio.schemas import CloudWorkerSettings, JobOptions, ProviderSettings
 from studio.settings_store import (
@@ -20,6 +20,33 @@ from studio.settings_store import (
 
 
 class TaskManagementTests(unittest.TestCase):
+    def test_weighted_gpu_scheduler_admits_next_job_after_one_model_finishes(self):
+        scheduler = WeightedGpuScheduler(capacity=5)
+        self.assertTrue(scheduler.acquire("job-a", 2, timeout=0))
+        self.assertTrue(scheduler.acquire("job-b", 2, timeout=0))
+        self.assertFalse(scheduler.acquire("job-c", 2, timeout=0))
+        self.assertEqual(scheduler.used, 4)
+        self.assertEqual(scheduler.set_weight("job-a", 1), 1)
+        self.assertTrue(scheduler.acquire("job-c", 2, timeout=0))
+        self.assertEqual(scheduler.used, 5)
+        self.assertEqual(scheduler.release("job-b"), 2)
+        self.assertEqual(scheduler.used, 3)
+
+    def test_cloud_model_completion_releases_one_dynamic_gpu_unit(self):
+        scheduler = WeightedGpuScheduler(capacity=5)
+        self.assertTrue(scheduler.acquire("cloud-job", 2, timeout=0))
+        manager = JobManager.__new__(JobManager)
+        job = JobState(id="cloud-job", options=JobOptions(input_path="movie.mp4"))
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch("studio.runner.JOBS_DIR", Path(folder)),
+            patch("studio.runner.REMOTE_GPU_LOCK", scheduler),
+        ):
+            manager.cloud_log(job, "Cohere reviewed=42")
+            manager.cloud_log(job, "Qwen3-ASR windows=42 low_confidence=3")
+        self.assertEqual(scheduler.used, 1)
+        self.assertTrue(any("释放 1 个 GPU 动态额度" in line for line in job.logs))
+
     def test_individual_resume_recovers_paused_job_after_restart(self):
         job = MagicMock()
         job.options = JobOptions(input_path="movie.mp4")

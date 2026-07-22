@@ -38,8 +38,53 @@ from .asr_context import attach_asr_reviews
 
 JOBS_DIR = DATA_DIR / "jobs"
 UPLOADS_DIR = DATA_DIR / "uploads"
-REMOTE_GPU_LOCK = threading.BoundedSemaphore(CLOUD_GPU_CONCURRENCY)
 LOCAL_GPU_LOCK = threading.Lock()
+
+
+class WeightedGpuScheduler:
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self._allocations: dict[str, int] = {}
+        self._condition = threading.Condition()
+
+    @property
+    def used(self) -> int:
+        with self._condition:
+            return sum(self._allocations.values())
+
+    def acquire(self, job_id: str, weight: int, timeout: float) -> bool:
+        with self._condition:
+            if job_id in self._allocations:
+                return True
+            if sum(self._allocations.values()) + weight <= self.capacity:
+                self._allocations[job_id] = weight
+                return True
+            self._condition.wait(timeout)
+            return False
+
+    def set_weight(self, job_id: str, weight: int) -> int:
+        with self._condition:
+            previous = self._allocations.get(job_id)
+            if previous is None or weight >= previous:
+                return 0
+            self._allocations[job_id] = max(0, weight)
+            released = previous - self._allocations[job_id]
+            self._condition.notify_all()
+            return released
+
+    def release(self, job_id: str) -> int:
+        with self._condition:
+            released = self._allocations.pop(job_id, 0)
+            if released:
+                self._condition.notify_all()
+            return released
+
+
+# Each complete Qwen+Cohere pair reserves two roughly 4.7 GB units. Five
+# units keep about 8 GB free on the configured 32 GB GPU for CUDA variance,
+# large-v3 voting and forced alignment. A task drops to one unit as soon as
+# either primary model finishes, allowing the next task to enter the pipeline.
+REMOTE_GPU_LOCK = WeightedGpuScheduler(CLOUD_GPU_CONCURRENCY * 2 + 1)
 CONFIG_GROUP_LABELS = {
     "recognition": "识别策略",
     "translation": "翻译配置",
@@ -556,12 +601,19 @@ class JobManager:
         if control.compute_lock is not None:
             self.release_compute(job)
         if lock is REMOTE_GPU_LOCK:
-            wait_message = f"等待{label}资源 · 最多并行 {CLOUD_GPU_CONCURRENCY} 个任务"
+            wait_message = (
+                f"等待{label}动态额度 · 双模型阶段占 2，单模型/裁决阶段占 1，"
+                f"总额度 {REMOTE_GPU_LOCK.capacity}"
+            )
         else:
             wait_message = f"等待独占{label}资源，避免并行任务抢占显存"
         self.update(job, stage=f"等待{label}资源", log=wait_message)
-        while not lock.acquire(timeout=0.25):
-            self.checkpoint(job)
+        if lock is REMOTE_GPU_LOCK:
+            while not lock.acquire(job.id, 2, timeout=0.25):
+                self.checkpoint(job)
+        else:
+            while not lock.acquire(timeout=0.25):
+                self.checkpoint(job)
         control.compute_lock = lock
         control.compute_label = label
         self.update(job, log=f"已取得{label}资源")
@@ -574,8 +626,25 @@ class JobManager:
         label = control.compute_label
         control.compute_lock = None
         control.compute_label = ""
-        lock.release()
+        if lock is REMOTE_GPU_LOCK:
+            lock.release(job.id)
+        else:
+            lock.release()
         self.update(job, log=f"已释放{label}资源，下一任务可以进入该阶段")
+
+    def cloud_log(self, job: JobState, message: str):
+        message = message[-600:]
+        self.update(job, log=message)
+        if re.match(r"^(?:Cohere reviewed=\d+|Qwen3-ASR windows=\d+\b)", message):
+            released = REMOTE_GPU_LOCK.set_weight(job.id, 1)
+            if released:
+                self.update(
+                    job,
+                    log=(
+                        "一个并行识别模型已完成并释放 1 个 GPU 动态额度；"
+                        "调度器可提前放入下一任务"
+                    ),
+                )
 
     def persist(self, job: JobState):
         folder = JOBS_DIR / job.id
@@ -818,7 +887,7 @@ class JobManager:
             self.update(job, stage="连接云 GPU 运算单元", progress=0.08)
             worker = CloudWhisperWorker(
                 worker_settings,
-                logger=lambda message: self.update(job, log=message[-600:]),
+                logger=lambda message: self.cloud_log(job, message),
                 checkpoint=lambda: self.checkpoint(job),
             )
             job.cloud_session = worker
