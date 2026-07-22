@@ -6,6 +6,37 @@ from studio.text_review import review_cues
 
 
 class TextReviewTests(unittest.TestCase):
+    def test_review_uses_twenty_four_cue_batches(self):
+        class FakeProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def chat_json(self, model, prompt, request):
+                self.calls += 1
+                return {
+                    "items": [
+                        {
+                            "id": item["id"],
+                            "source": item["source"],
+                            "zh": item["zh"],
+                            "reason": "保持",
+                        }
+                        for item in request["targets"]
+                    ]
+                }
+
+        provider = FakeProvider()
+        rows = [
+            {"id": index + 1, "start": index, "end": index + 1, "source": "はい", "zh": "好的"}
+            for index in range(25)
+        ]
+        with patch("studio.text_review.provider_from_settings", return_value=provider):
+            reviewed, _ = review_cues(
+                rows, ProviderSettings(kind="local_ollama", model="review-model")
+            )
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(reviewed, rows)
+
     def test_review_preserves_ids_count_and_timing(self):
         class FakeProvider:
             def chat_json(self, model, prompt, request):

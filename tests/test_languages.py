@@ -68,7 +68,12 @@ class LanguageSupportTests(unittest.TestCase):
             def chat_json(self, model, prompt, request):
                 self.prompts.append(prompt)
                 self.requests.append(request)
-                return {"id": request["target"]["id"], "zh": "你好"}
+                return {
+                    "items": [
+                        {"id": target["id"], "zh": "你好"}
+                        for target in request["targets"]
+                    ]
+                }
 
         fake = FakeProvider()
         settings = ProviderSettings(kind="local_ollama", model="test")
@@ -80,7 +85,7 @@ class LanguageSupportTests(unittest.TestCase):
             )
         self.assertEqual(korean[0]["source"], "안녕하세요")
         self.assertIn("韩中影视字幕译者", fake.prompts[0])
-        self.assertEqual(fake.requests[0]["target"]["source"], "안녕하세요")
+        self.assertEqual(fake.requests[0]["targets"][0]["source"], "안녕하세요")
 
         with patch("studio.translation.provider_from_settings", return_value=FakeProvider()):
             japanese = translate_cues(

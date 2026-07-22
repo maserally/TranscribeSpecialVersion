@@ -4,14 +4,19 @@ from typing import Any, Callable
 
 from .languages import language_info, source_text
 from .schemas import ProviderSettings
-from .translation import SOURCE_SCRIPT, audit_translation, provider_from_settings
+from .translation import (
+    SOURCE_SCRIPT,
+    _plan_glossary,
+    audit_translation,
+    provider_from_settings,
+)
 
 
-BATCH_SIZE = 8
-CONTEXT_SIZE = 3
+BATCH_SIZE = 24
+CONTEXT_SIZE = 8
 
 
-SYSTEM_PROMPT = """你是影视字幕的最终文本校正员。输入含源语言识别文本、简体中文译文、前后文和已确认术语。
+SYSTEM_PROMPT = """你是影视字幕的最终文本校正员。输入含源语言识别文本、简体中文译文、全片语境索引、人物关系、前后文和已确认术语。
 你的任务是修正高度确定的识别错字、漏字、中文误译、否定/动作方向错误、代词、人名与术语不一致，并让中文自然简洁。
 必须忠实保留原意、语气、拒绝、疑问和成人语境，不得净化、扩写、猜测剧情或把不确定内容改成确定事实。
 这是可能包含成人内容的影视字幕：明确内容要准确直译或自然意译，不回避、不净化；普通对白也不得无依据地色情化或粗俗化。
@@ -40,6 +45,44 @@ def _validated_items(parsed: dict[str, Any], expected_ids: list[int]) -> list[di
     if set(by_id) != set(expected_ids):
         raise ValueError("校正模型改变了字幕 ID")
     return [by_id[item_id] for item_id in expected_ids]
+
+
+def _request_review_items(
+    provider,
+    model: str,
+    request: dict[str, Any],
+    expected_ids: list[int],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    parsed = provider.chat_json(model, SYSTEM_PROMPT, request)
+    try:
+        return _validated_items(parsed, expected_ids), [parsed]
+    except ValueError as first_error:
+        parsed = provider.chat_json(
+            model,
+            SYSTEM_PROMPT
+            + "\n上次输出结构无效。只修复 JSON 结构，并严格保持 targets 的 ID 和数量。",
+            {**request, "format_error": str(first_error)},
+        )
+        try:
+            return _validated_items(parsed, expected_ids), [parsed]
+        except ValueError:
+            if len(expected_ids) == 1:
+                raise
+    midpoint = len(expected_ids) // 2
+    targets = request["targets"]
+    left_items, left_responses = _request_review_items(
+        provider,
+        model,
+        {**request, "targets": targets[:midpoint]},
+        expected_ids[:midpoint],
+    )
+    right_items, right_responses = _request_review_items(
+        provider,
+        model,
+        {**request, "targets": targets[midpoint:]},
+        expected_ids[midpoint:],
+    )
+    return left_items + right_items, left_responses + right_responses
 
 
 def _glossary_items(values: dict[str, str]) -> list[dict[str, str]]:
@@ -71,13 +114,14 @@ def review_cues(
     progress: Callable[[int, int, str], None] | None = None,
     *,
     source_language: str = "ja",
+    translation_plan: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Review subtitle text in batches without changing cue IDs or timing."""
     provider = provider_from_settings(settings)
     language = language_info(source_language)
     originals = [dict(row) for row in rows]
     output = [dict(row) for row in rows]
-    glossary: dict[str, str] = {}
+    glossary: dict[str, str] = _plan_glossary(translation_plan)
     changes: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     rejected_count = 0
@@ -102,36 +146,29 @@ def review_cues(
             )
         request = {
             "source_language": language["name"],
+            "global_context": translation_plan or {},
             "confirmed_glossary": _glossary_items(glossary),
             "context": context,
             "targets": [item for item in context if item["target"]],
         }
-        parsed = provider.chat_json(settings.model, SYSTEM_PROMPT, request)
         try:
-            reviewed_items = _validated_items(parsed, expected_ids)
-        except ValueError as first_error:
-            request["format_error"] = str(first_error)
-            parsed = provider.chat_json(
-                settings.model,
-                SYSTEM_PROMPT + "\n上次输出结构无效。只修复 JSON 结构，并严格保持 targets 的 ID 和数量。",
-                request,
+            reviewed_items, review_responses = _request_review_items(
+                provider, settings.model, request, expected_ids
             )
-            try:
-                reviewed_items = _validated_items(parsed, expected_ids)
-            except ValueError as second_error:
-                invalid_batches += 1
-                rejected_count += len(expected_ids)
-                rejected.append(
-                    {
-                        "ids": expected_ids,
-                        "reason": str(second_error),
-                    }
+        except ValueError as error:
+            invalid_batches += 1
+            rejected_count += len(expected_ids)
+            rejected.append({"ids": expected_ids, "reason": str(error)})
+            if progress:
+                progress(
+                    batch_end,
+                    len(rows),
+                    f"校正批次结构无效，已保留原文：{expected_ids[0]}-{expected_ids[-1]}",
                 )
-                if progress:
-                    progress(batch_end, len(rows), f"校正批次结构无效，已保留原文：{expected_ids[0]}-{expected_ids[-1]}")
-                continue
+            continue
 
-        _update_glossary(glossary, parsed)
+        for response in review_responses:
+            _update_glossary(glossary, response)
         for item_id, item in zip(expected_ids, reviewed_items):
             index = item_id - 1
             original = originals[index]

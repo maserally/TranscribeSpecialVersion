@@ -32,7 +32,7 @@ from .remote_asr import run_remote_asr
 from .schemas import CloudWorkerSettings, JobOptions
 from .subtitles import mux_hard_subtitles, mux_soft_subtitles, write_subtitles
 from .text_review import review_cues
-from .translation import translate_cues
+from .translation import build_translation_plan, translate_cues
 from .asr_context import attach_asr_reviews
 
 
@@ -1219,13 +1219,49 @@ class JobManager:
         if options.translator.kind == "local_ollama":
             self.acquire_compute(job, LOCAL_GPU_LOCK, "本机翻译模型")
         self.lock_config_group(job, "translation")
-        self.update(job, stage="逐句翻译与否定词审计", progress=0.70)
-        def translation_progress(current, total, _):
+        translation_plan_path = workdir / "translation_plan.json"
+        translation_plan = None
+        if translation_plan_path.exists():
+            try:
+                candidate_plan = json.loads(translation_plan_path.read_text(encoding="utf-8"))
+                if (
+                    candidate_plan.get("cue_count") == len(primary)
+                    and candidate_plan.get("source_language") == options.source_language
+                ):
+                    translation_plan = candidate_plan
+                    self.update(job, log="复用全片语境索引")
+            except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+                translation_plan = None
+        if translation_plan is None:
+            self.update(job, stage="建立全片场景、人物与术语语境", progress=0.68)
+
+            def plan_progress(current, total, message):
+                self.checkpoint(job)
+                self.update(
+                    job,
+                    progress=0.66 + 0.04 * current / max(1, total),
+                    log=message,
+                )
+
+            translation_plan = build_translation_plan(
+                primary,
+                options.translator,
+                plan_progress,
+                source_language=options.source_language,
+            )
+            plan_tmp = translation_plan_path.with_suffix(".tmp")
+            plan_tmp.write_text(
+                json.dumps(translation_plan, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            plan_tmp.replace(translation_plan_path)
+
+        self.update(job, stage="全片语境批量翻译与语义审计", progress=0.70)
+        def translation_progress(current, total, message):
             self.checkpoint(job)
             self.update(
                 job,
                 progress=0.70 + 0.12 * current / max(1, total),
-                log=(f"翻译 {current}/{total}" if current % 10 == 0 else None),
+                log=message or f"语境批量翻译 {current}/{total}",
             )
 
         translation_checkpoint = workdir / "translation_checkpoint.json"
@@ -1257,6 +1293,7 @@ class JobManager:
             target_language=options.target_language,
             existing=existing_translation,
             checkpoint=save_translation_checkpoint,
+            translation_plan=translation_plan,
         )
         if options.translator.kind == "local_ollama" and options.text_reviewer.kind != "local_ollama":
             self.release_compute(job)
@@ -1307,6 +1344,7 @@ class JobManager:
                 options.text_reviewer,
                 text_review_progress,
                 source_language=options.source_language,
+                translation_plan=translation_plan,
             )
             review_checkpoint_tmp = text_review_checkpoint.with_suffix(".tmp")
             review_checkpoint_tmp.write_text(

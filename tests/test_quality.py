@@ -9,7 +9,12 @@ from studio.recall import (
     vad_fallback_events_for_gaps,
 )
 from studio.schemas import ProviderSettings
-from studio.translation import audit_translation, safe_high_risk, translate_cues
+from studio.translation import (
+    build_translation_plan,
+    audit_translation,
+    safe_high_risk,
+    translate_cues,
+)
 
 
 class QualityOptimizationTests(unittest.TestCase):
@@ -144,9 +149,10 @@ class QualityOptimizationTests(unittest.TestCase):
 
             def chat_json(self, model, prompt, request):
                 self.calls += 1
+                ids = [target["id"] for target in request["targets"]]
                 if self.calls < 3:
-                    return {"id": 1, "zh": "我在看かきた酱的照片"}
-                return {"id": 1, "zh": "我在看柿田酱的照片"}
+                    return {"items": [{"id": item_id, "zh": "我在看かきた酱的照片"} for item_id in ids]}
+                return {"items": [{"id": item_id, "zh": "我在看柿田酱的照片"} for item_id in ids]}
 
         provider = FakeProvider()
         settings = ProviderSettings(kind="local_ollama", model="test")
@@ -158,6 +164,80 @@ class QualityOptimizationTests(unittest.TestCase):
         self.assertEqual(provider.calls, 3)
         self.assertEqual(rows[0]["zh"], "我在看柿田酱的照片")
         self.assertNotIn("translation_warnings", rows[0])
+
+    def test_context_translation_batches_twelve_cues_per_request(self):
+        class FakeProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def chat_json(self, model, prompt, request):
+                self.calls += 1
+                return {
+                    "items": [
+                        {"id": target["id"], "zh": "你好"}
+                        for target in request["targets"]
+                    ]
+                }
+
+        provider = FakeProvider()
+        rows = [
+            {"start": index, "end": index + 1, "source": "こんにちは"}
+            for index in range(25)
+        ]
+        with patch("studio.translation.provider_from_settings", return_value=provider):
+            translated = translate_cues(
+                rows, ProviderSettings(kind="local_ollama", model="test")
+            )
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(len(translated), 25)
+
+    def test_invalid_large_translation_batch_splits_without_losing_cues(self):
+        class SplitProvider:
+            def chat_json(self, model, prompt, request):
+                if len(request["targets"]) > 6:
+                    return {"items": []}
+                return {
+                    "items": [
+                        {"id": target["id"], "zh": "好的"}
+                        for target in request["targets"]
+                    ]
+                }
+
+        rows = [
+            {"start": index, "end": index + 1, "source": "はい"}
+            for index in range(12)
+        ]
+        with patch(
+            "studio.translation.provider_from_settings", return_value=SplitProvider()
+        ):
+            translated = translate_cues(
+                rows, ProviderSettings(kind="local_ollama", model="test")
+            )
+        self.assertEqual(len(translated), 12)
+        self.assertTrue(all(row["zh"] == "好的" for row in translated))
+
+    def test_translation_plan_summarizes_large_source_in_scene_chunks(self):
+        class FakeProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def chat_json(self, model, prompt, request):
+                self.calls += 1
+                return {
+                    "summary": f"场景{self.calls}",
+                    "characters": ["人物甲"],
+                    "glossary": [{"source": "甲", "zh": "甲"}],
+                }
+
+        provider = FakeProvider()
+        rows = [{"source": "はい"} for _ in range(241)]
+        with patch("studio.translation.provider_from_settings", return_value=provider):
+            plan = build_translation_plan(
+                rows, ProviderSettings(kind="local_ollama", model="test")
+            )
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(plan["cue_count"], 241)
+        self.assertEqual(len(plan["scenes"]), 3)
 
 
 if __name__ == "__main__":
