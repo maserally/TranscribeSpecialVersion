@@ -216,6 +216,31 @@ class QualityOptimizationTests(unittest.TestCase):
         self.assertEqual(len(translated), 12)
         self.assertTrue(all(row["zh"] == "好的" for row in translated))
 
+    def test_legacy_translation_prefix_is_kept_and_only_remainder_is_batched(self):
+        class FakeProvider:
+            def __init__(self):
+                self.requested_ids = []
+
+            def chat_json(self, model, prompt, request):
+                ids = [target["id"] for target in request["targets"]]
+                self.requested_ids.extend(ids)
+                return {"items": [{"id": item_id, "zh": "新译"} for item_id in ids]}
+
+        provider = FakeProvider()
+        rows = [{"source": "はい", "start": i, "end": i + 1} for i in range(17)]
+        legacy = [
+            {**rows[i], "id": i + 1, "source": "はい", "zh": f"旧译{i + 1}"}
+            for i in range(5)
+        ]
+        with patch("studio.translation.provider_from_settings", return_value=provider):
+            translated = translate_cues(
+                rows,
+                ProviderSettings(kind="local_ollama", model="test"),
+                existing=legacy,
+            )
+        self.assertEqual([row["zh"] for row in translated[:5]], [f"旧译{i}" for i in range(1, 6)])
+        self.assertEqual(provider.requested_ids, list(range(6, 18)))
+
     def test_translation_plan_summarizes_large_source_in_scene_chunks(self):
         class FakeProvider:
             def __init__(self):

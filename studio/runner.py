@@ -1225,6 +1225,8 @@ class JobManager:
             try:
                 candidate_plan = json.loads(translation_plan_path.read_text(encoding="utf-8"))
                 if (
+                    candidate_plan.get("version") == 2
+                    and
                     candidate_plan.get("cue_count") == len(primary)
                     and candidate_plan.get("source_language") == options.source_language
                 ):
@@ -1273,7 +1275,14 @@ class JobManager:
                 )
                 self.update(
                     job,
-                    log=f"复用已校验翻译检查点 {len(existing_translation)} 条",
+                    log=(
+                        f"检测到翻译检查点 {len(existing_translation)}/{len(primary)} 条；"
+                        + (
+                            "旧阶段已完整结束，下一阶段使用新版全局复核"
+                            if len(existing_translation) == len(primary)
+                            else "保留已完成内容，剩余部分切换新版全片语境批译"
+                        )
+                    ),
                 )
             except (OSError, json.JSONDecodeError, TypeError):
                 existing_translation = []
@@ -1349,7 +1358,7 @@ class JobManager:
             review_checkpoint_tmp = text_review_checkpoint.with_suffix(".tmp")
             review_checkpoint_tmp.write_text(
                 json.dumps(
-                    {"version": 1, "cues": translated, "audit": text_review_audit},
+                    {"version": 2, "cues": translated, "audit": text_review_audit},
                     ensure_ascii=False,
                     indent=2,
                 ),

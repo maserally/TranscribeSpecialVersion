@@ -228,7 +228,7 @@ def build_translation_plan(
         if progress:
             progress(end, len(rows), f"全片语境索引 {end}/{len(rows)}")
     return {
-        "version": 1,
+        "version": 2,
         "source_language": source_language,
         "cue_count": len(rows),
         "scenes": scenes,
