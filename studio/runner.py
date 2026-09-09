@@ -435,7 +435,10 @@ class JobManager:
             control = self.controls.get(job_id)
             if control and not control.finished_event.is_set():
                 raise RuntimeError("任务进程仍在退出，请稍后重试")
-            job.cloud_worker_settings = cloud_worker_settings or job.cloud_worker_settings
+            # A local retry must also clear stale cloud credentials left by an
+            # earlier mode.  The caller has already resolved whether this task
+            # explicitly requires cloud execution.
+            job.cloud_worker_settings = cloud_worker_settings
             job.status = "queued"
             job.stage = "检查阶段检查点，等待续跑"
             job.error = ""
@@ -795,7 +798,7 @@ class JobManager:
         use_cloud_worker = bool(
             worker_settings
             and worker_settings.enabled
-            and options.asr.kind in {"local_whisper", "accuracy_ensemble"}
+            and (options.cloud_stage_only or options.asr.kind == "accuracy_ensemble")
             and not resume_after_recognition
         )
         analysis_media = media

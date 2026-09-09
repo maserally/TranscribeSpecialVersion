@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from studio.main import _bulk_job_action, _resume_paused_job, app
+from studio.main import _bulk_job_action, _resume_paused_job, _worker_for_options, app
 from studio.providers import supports_segment_timestamps
 from studio.remote_asr import _remote_packs
 from studio.runner import JobControl, JobManager, JobState, WeightedGpuScheduler
@@ -63,6 +63,53 @@ class TaskManagementTests(unittest.TestCase):
         ):
             self.assertIs(_resume_paused_job("paused-job"), job)
         fake_manager.recover_paused.assert_called_once()
+        self.assertIsNone(fake_manager.recover_paused.call_args.args[1])
+
+    def test_cloud_settings_are_bound_only_to_explicit_cloud_jobs(self):
+        worker = CloudWorkerSettings(enabled=True, host="gpu.example.com")
+        local = JobOptions(
+            input_path="movie.mp4",
+            asr=ProviderSettings(kind="local_whisper", model="medium"),
+        )
+        ensemble = JobOptions(
+            input_path="movie.mp4",
+            asr=ProviderSettings(kind="accuracy_ensemble", model="accuracy-ensemble-v1"),
+        )
+        staged = JobOptions(
+            input_path="movie.mp4",
+            asr=ProviderSettings(kind="local_whisper", model="medium"),
+            cloud_stage_only=True,
+        )
+
+        self.assertIsNone(_worker_for_options(local, worker))
+        self.assertIs(_worker_for_options(ensemble, worker), worker)
+        self.assertIs(_worker_for_options(staged, worker), worker)
+
+    def test_retrying_local_job_clears_stale_cloud_settings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            manager = JobManager.__new__(JobManager)
+            manager.lock = threading.RLock()
+            manager.jobs = {}
+            manager.controls = {}
+            job = JobState(
+                id="local-retry",
+                options=JobOptions(
+                    input_path="movie.mp4",
+                    asr=ProviderSettings(kind="local_whisper", model="medium"),
+                ),
+                status="failed",
+                cloud_worker_settings=CloudWorkerSettings(
+                    enabled=True, host="old-gpu.example.com"
+                ),
+            )
+            manager.jobs[job.id] = job
+            with (
+                patch("studio.runner.JOBS_DIR", Path(folder)),
+                patch.object(manager, "_run_guarded"),
+            ):
+                retried = manager.retry_failed(job.id, None)
+
+            self.assertIsNone(retried.cloud_worker_settings)
 
     def test_cloud_model_progress_is_structured_and_persisted(self):
         with tempfile.TemporaryDirectory() as folder:

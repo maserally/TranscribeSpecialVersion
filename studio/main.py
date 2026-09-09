@@ -55,7 +55,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.19.8")
+app = FastAPI(title="字幕翻译工作室", version="1.19.9")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -211,6 +211,17 @@ async def upload(file: UploadFile = File(...)):
     return {"path": str(target), "size": size, "name": safe_name}
 
 
+def _worker_for_options(
+    options: JobOptions, worker: CloudWorkerSettings
+) -> CloudWorkerSettings | None:
+    """Bind cloud credentials only to tasks that explicitly request cloud execution."""
+    if not worker.enabled:
+        return None
+    if options.cloud_stage_only or options.asr.kind == "accuracy_ensemble":
+        return worker
+    return None
+
+
 @app.post("/api/jobs")
 def create_job(options: JobOptions):
     options = resolve_provider_api_keys(options)
@@ -235,7 +246,7 @@ def create_job(options: JobOptions):
             status_code=400,
             detail="无卡预上传必须启用云 GPU 运算单元，并选择本地 Whisper 识别",
         )
-    return manager.create(options, worker if worker.enabled else None).public()
+    return manager.create(options, _worker_for_options(options, worker)).public()
 
 
 def _video_files_in(folder_text: str, recursive: bool = True) -> tuple[Path, list[Path]]:
@@ -386,7 +397,7 @@ def create_folder_jobs(request: FolderBatchRequest):
         scoped_names.add(output_name.casefold())
         options.output_name = output_name
         options.output_dir = str(job_output_dir) if job_output_dir else ""
-        created.append(manager.create(options, worker if worker.enabled else None).public())
+        created.append(manager.create(options, _worker_for_options(options, worker)).public())
     return {"count": len(created), "folder": str(folder), "jobs": created}
 
 
@@ -722,7 +733,7 @@ def retry_all_failed_jobs():
                     raise RuntimeError("云算力配置尚未启用")
                 manager.retry_staged_upload(job_id, worker)
             else:
-                manager.retry_failed(job_id, worker if worker.enabled else None)
+                manager.retry_failed(job_id, _worker_for_options(job.options, worker))
             succeeded.append(job_id)
         except Exception as exc:
             failed.append({"id": job_id, "error": str(exc)})
@@ -791,7 +802,9 @@ def retry_failed_job(job_id: str):
         if not job:
             raise KeyError(job_id)
         job.options = resolve_provider_api_keys(job.options)
-        return manager.retry_failed(job_id, worker if worker.enabled else None).public()
+        return manager.retry_failed(
+            job_id, _worker_for_options(job.options, worker)
+        ).public()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="任务不存在") from exc
     except RuntimeError as exc:
@@ -827,7 +840,7 @@ def _resume_paused_job(job_id: str):
         return manager.resume(job_id)
     saved = load_provider_settings(expose_secrets=True)
     worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
-    return manager.recover_paused(job_id, worker if worker.enabled else None)
+    return manager.recover_paused(job_id, _worker_for_options(job.options, worker))
 
 
 @app.post("/api/jobs/{job_id}/pause")
